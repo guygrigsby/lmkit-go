@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **Go 1.26+ toolchain** (GoMLX `main` requires `go 1.26`).
-- **Track GoMLX `main`, pinned** — `backend/go.mod` pins an exact commit pseudo-version; let `go mod tidy` resolve `compute`/`go-xla` (ADR-0001).
+- **Pin GoMLX to a fixed `main` commit** — `backend/go.mod` pins commit `516689cbe91329bf9aeac7750495a48bb85f9287` (the most recent `main` verified for this plan, 2026-06-19); `go mod tidy` resolves matching `compute`/`go-xla`. Bump to latest `@main` only *after* bring-up is green (ADR-0001, ADR-0006) — pin first, move the pin once something works.
 - **Backend boundary (ADR-0002):** only files under `backend/**` may import `gomlx`, `go-xla`, `compute`, or `pjrt`. Enforced by a grep test in the gate. `model`/`train`/`app` never import the vendor.
 - **Per-package modules + `go.work` (ADR-0005):** each context is its own module; `internal/` exists only in `app`. Milestone 1 creates only the `backend` and `app` modules.
 - **Public API is additive (ADR-0008):** the `Backend` interface stays minimal; under-expose now, grow later. Method names are specific to what they prove.
@@ -101,11 +101,11 @@ module github.com/guygrigsby/lmkit-go/backend
 go 1.26
 ```
 
-Then pin GoMLX `main` (writes the pseudo-version + resolves `compute`/`go-xla`):
+Then pin GoMLX to the fixed `main` commit (resolves the canonical pseudo-version + `compute`/`go-xla`):
 ```bash
-cd backend && go get github.com/gomlx/gomlx@main && cd ..
+cd backend && go get github.com/gomlx/gomlx@516689cbe91329bf9aeac7750495a48bb85f9287 && cd ..
 ```
-Expected: `backend/go.mod` gains `require github.com/gomlx/gomlx v0.0.0-...` (and `compute`/`go-xla` once code imports them).
+Expected: `backend/go.mod` gains `require github.com/gomlx/gomlx v0.0.0-20260619...-516689cbe913` (and `compute`/`go-xla` once code imports them). Do **not** use `@main` — pin this commit until bring-up is green, then bump.
 
 - [ ] **Step 2: Write the backend domain types and interface**
 
