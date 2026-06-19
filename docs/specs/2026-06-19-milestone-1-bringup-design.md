@@ -53,7 +53,10 @@ backend boundary.
 
 ## Minimal backend interface (grown, not designed)
 
-Only what bring-up needs. Expanded in later milestones as `model`/`train` require.
+Only what bring-up needs. Expanded in later milestones as `model`/`train`
+require — **additively** (ADR-0008): once `backend` is a tagged public module we
+can add to this interface but not remove from it, so under-expose now. Prefer
+unexported until a consumer needs it.
 
 ```go
 package backend

@@ -167,5 +167,7 @@ PJRT-plugin revival** (ADR-0004), gated behind a working CUDA baseline.
   automatically; the named tax of a bleeding-edge stack).
 - ADR-0007 — Test rigor as the safety net (backend boundary contract tests catch
   vendor refactors in one place; the green gate is the merge bar for every bump).
+- ADR-0008 — Public API evolves additively (grow, don't remove; under-expose first;
+  removals cost a major-version bump).
 </content>
 </invoke>
