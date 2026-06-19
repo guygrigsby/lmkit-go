@@ -83,7 +83,6 @@ func (b *Backend) FitConstant(target float32, steps int) (float32, float32, erro
 	ds = ds.Infinite(true).Shuffle().BatchSize(n, false)
 
 	store := model.NewStore()
-	store.SetParam(optimizer.ParamLearningRate, 1e-2)
 
 	modelFn := func(scope *model.Scope, spec any, inputs []*g.Node) []*g.Node {
 		return []*g.Node{layers.Dense(scope, inputs[0], false /*useBias*/, 1)}

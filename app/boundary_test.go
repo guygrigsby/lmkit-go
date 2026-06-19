@@ -17,13 +17,19 @@ func TestBackendBoundary(t *testing.T) {
 	cmd := exec.Command("git", "grep", "-lE", `github\.com/gomlx`,
 		"--", "*.go", ":!app/boundary_test.go")
 	cmd.Dir = strings.TrimSpace(string(root))
-	out, _ := cmd.Output() // exit 1 (no matches) yields empty output; that's a pass
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+			t.Fatalf("git grep failed: %v", err)
+		}
+		// exit code 1 == no matches == clean; out is empty
+	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "backend/") {
-			t.Errorf("vendor import outside backend/: %s", line)
+		if !strings.HasPrefix(line, "backend/gomlx/") {
+			t.Errorf("vendor import outside backend/gomlx/: %s", line)
 		}
 	}
 }
