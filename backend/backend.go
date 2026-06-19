@@ -31,4 +31,6 @@ type Backend interface {
 	Device() Device
 	// MatMul returns a@b for 2-D matrices (a: m×k, b: k×n -> m×n).
 	MatMul(a, b Tensor) (Tensor, error)
+	// GradSumSquares returns d/dx of sum(x²), i.e. 2x. Proves reverse-mode autodiff.
+	GradSumSquares(x Tensor) (Tensor, error)
 }

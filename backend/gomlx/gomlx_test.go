@@ -31,3 +31,21 @@ func TestMatMul(t *testing.T) {
 		t.Errorf("Shape = %v, want [2 2]", got.Shape)
 	}
 }
+
+func TestGradSumSquares(t *testing.T) {
+	be, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	x := backend.Tensor{Shape: []int{3}, Data: []float32{1, 2, 3}}
+	got, err := be.GradSumSquares(x)
+	if err != nil {
+		t.Fatalf("GradSumSquares: %v", err)
+	}
+	want := []float32{2, 4, 6} // d/dx sum(x^2) = 2x
+	for i, w := range want {
+		if got.Data[i] != w {
+			t.Errorf("Data[%d] = %v, want %v", i, got.Data[i], w)
+		}
+	}
+}

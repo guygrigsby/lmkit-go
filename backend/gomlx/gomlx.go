@@ -47,5 +47,15 @@ func (b *Backend) MatMul(a, c backend.Tensor) (backend.Tensor, error) {
 	}, nil
 }
 
+func (b *Backend) GradSumSquares(x backend.Tensor) (backend.Tensor, error) {
+	xt := tensors.FromFlatDataAndDimensions(x.Data, x.Shape...)
+	exec := g.MustNewExec(b.be, func(n *g.Node) *g.Node {
+		sumSq := g.ReduceAllSum(g.Mul(n, n)) // scalar loss
+		return g.Gradient(sumSq, n)[0]       // d(sumSq)/dn = 2n
+	})
+	out := exec.MustExec1(xt)
+	return backend.Tensor{Shape: x.Shape, Data: tensors.MustCopyFlatData[float32](out)}, nil
+}
+
 // compile-time check that the adapter satisfies the boundary.
 var _ backend.Backend = (*Backend)(nil)
