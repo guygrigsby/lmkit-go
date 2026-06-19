@@ -34,6 +34,11 @@ backend boundary.
   - AdamW reduces a quadratic toy loss to ~0 over N steps;
   - the **backend-boundary grep test** (ADR-0002): `gomlx|go-xla|pjrt` appears
     only under `backend/`.
+  - **backend boundary contract tests** (ADR-0007): pin the numerical output of
+    matmul/grad/AdamW through the `backend` interface so a GoMLX `main` bump that
+    changes vendor behavior fails here, in `backend/`, not downstream. These are
+    the early-warning system for the tracked-`main` churn — write them as the
+    adapter is built, not after.
 - Device selection: pick SimpleGo / XLA-CPU / CUDA via config or env, default to
   the best available.
 

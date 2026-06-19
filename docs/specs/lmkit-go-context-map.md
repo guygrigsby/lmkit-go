@@ -165,5 +165,7 @@ PJRT-plugin revival** (ADR-0004), gated behind a working CUDA baseline.
   dependency-light; `internal/` only in `app`).
 - ADR-0006 — Aggressive upgrade cadence (Go + all deps bumped often and
   automatically; the named tax of a bleeding-edge stack).
+- ADR-0007 — Test rigor as the safety net (backend boundary contract tests catch
+  vendor refactors in one place; the green gate is the merge bar for every bump).
 </content>
 </invoke>
