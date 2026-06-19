@@ -57,14 +57,27 @@ func TestFitConstant(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	const target = 3.0
-	w, loss, err := be.FitConstant(target, 800)
+
+	// No decay: AdamW (decay=0) drives w -> target.
+	w, loss, err := be.FitConstant(target, 800, 0.0)
 	if err != nil {
-		t.Fatalf("FitConstant: %v", err)
+		t.Fatalf("FitConstant(decay=0): %v", err)
 	}
 	if math.Abs(float64(w-target)) > 0.05 {
 		t.Errorf("w = %v, want ~%v", w, target)
 	}
 	if loss > 1e-2 {
 		t.Errorf("loss = %v, want < 1e-2", loss)
+	}
+
+	// Decoupled weight decay: with decay>0 AdamW also pulls w toward 0, so it
+	// settles measurably below target. This is the behavior that distinguishes
+	// AdamW from plain Adam — a zero-decay run could not show it.
+	wDecay, _, err := be.FitConstant(target, 800, 1.0)
+	if err != nil {
+		t.Fatalf("FitConstant(decay=1): %v", err)
+	}
+	if wDecay >= w-0.1 {
+		t.Errorf("weight decay had no measurable effect: wDecay=%v, want < %v (w-0.1)", wDecay, w-0.1)
 	}
 }

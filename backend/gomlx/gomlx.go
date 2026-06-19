@@ -63,7 +63,7 @@ func (b *Backend) GradSumSquares(x backend.Tensor) (backend.Tensor, error) {
 	return backend.Tensor{Shape: x.Shape, Data: tensors.MustCopyFlatData[float32](out)}, nil
 }
 
-func (b *Backend) FitConstant(target float32, steps int) (float32, float32, error) {
+func (b *Backend) FitConstant(target float32, steps int, weightDecay float64) (float32, float32, error) {
 	// Inputs are all ones, labels all `target`; with a no-bias 1-unit Dense,
 	// y = w*1, so MSE drives the single weight w -> target.
 	const n = 64
@@ -87,7 +87,9 @@ func (b *Backend) FitConstant(target float32, steps int) (float32, float32, erro
 	modelFn := func(scope *model.Scope, spec any, inputs []*g.Node) []*g.Node {
 		return []*g.Node{layers.Dense(scope, inputs[0], false /*useBias*/, 1)}
 	}
-	opt := optimizer.Adam().WeightDecay(0.0).LearningRate(5e-2).Done() // AdamW path; lr=5e-2 ensures convergence from random init
+	// AdamW: WeightDecay is the decoupled decay coefficient; lr=5e-2 ensures
+	// convergence from the He-initialized weight within the step budget.
+	opt := optimizer.Adam().WeightDecay(weightDecay).LearningRate(5e-2).Done()
 	trainer := train.NewTrainer(b.be, store, modelFn, loss.MeanSquaredError, opt, nil, nil)
 	loop := train.NewLoop(trainer)
 	if _, err := loop.RunSteps(ds, steps); err != nil {

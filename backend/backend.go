@@ -34,7 +34,10 @@ type Backend interface {
 	// GradSumSquares returns d/dx of sum(x²), i.e. 2x. Proves reverse-mode autodiff.
 	GradSumSquares(x Tensor) (Tensor, error)
 	// FitConstant fits a single weight w (no bias) to target via AdamW for the
-	// given steps, returning the learned w and the final MSE loss. Proves the
-	// optimizer path.
-	FitConstant(target float32, steps int) (w, loss float32, err error)
+	// given steps, returning the learned w and the final MSE loss. weightDecay is
+	// AdamW's decoupled weight-decay coefficient: 0 fits w cleanly to target, a
+	// positive value also pulls w toward 0 (so it settles below target), which is
+	// the behavior that distinguishes AdamW from plain Adam. Proves the optimizer
+	// path including decoupled decay.
+	FitConstant(target float32, steps int, weightDecay float64) (w, loss float32, err error)
 }

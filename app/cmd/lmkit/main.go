@@ -51,7 +51,7 @@ func quickstart() error {
 	}
 	fmt.Printf("gradient OK  %v\n", gr.Data)
 
-	w, loss, err := be.FitConstant(3.0, 800)
+	w, loss, err := be.FitConstant(3.0, 800, 0.0)
 	if err != nil {
 		return err
 	}
