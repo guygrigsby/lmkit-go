@@ -33,4 +33,8 @@ type Backend interface {
 	MatMul(a, b Tensor) (Tensor, error)
 	// GradSumSquares returns d/dx of sum(x²), i.e. 2x. Proves reverse-mode autodiff.
 	GradSumSquares(x Tensor) (Tensor, error)
+	// FitConstant fits a single weight w (no bias) to target via AdamW for the
+	// given steps, returning the learned w and the final MSE loss. Proves the
+	// optimizer path.
+	FitConstant(target float32, steps int) (w, loss float32, err error)
 }

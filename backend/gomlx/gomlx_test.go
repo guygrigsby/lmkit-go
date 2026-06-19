@@ -1,6 +1,7 @@
 package gomlx
 
 import (
+	"math"
 	"testing"
 
 	"github.com/guygrigsby/lmkit-go/backend"
@@ -47,5 +48,23 @@ func TestGradSumSquares(t *testing.T) {
 		if got.Data[i] != w {
 			t.Errorf("Data[%d] = %v, want %v", i, got.Data[i], w)
 		}
+	}
+}
+
+func TestFitConstant(t *testing.T) {
+	be, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const target = 3.0
+	w, loss, err := be.FitConstant(target, 800)
+	if err != nil {
+		t.Fatalf("FitConstant: %v", err)
+	}
+	if math.Abs(float64(w-target)) > 0.05 {
+		t.Errorf("w = %v, want ~%v", w, target)
+	}
+	if loss > 1e-2 {
+		t.Errorf("loss = %v, want < 1e-2", loss)
 	}
 }
