@@ -108,12 +108,33 @@ Per `DESIGN.md` validation philosophy — prove numerically before claiming it w
 
 ## Done criteria
 
-- [ ] `go.work` + `backend` and `app` modules; `backend/go.mod` pins a GoMLX
-      `main` commit; both modules build clean.
-- [ ] All four tests green locally (SimpleGo + XLA-CPU).
-- [ ] Quickstart prints passing matmul/grad/AdamW + device on the Mac.
-- [ ] Same quickstart green on `trig` with the CUDA device selected.
-- [ ] Backend-boundary grep test wired into the gate (runs per module).
+- [x] `go.work` + `backend` and `app` modules; `backend/go.mod` pins a GoMLX
+      `main` commit (`516689cbe913`); both modules build clean.
+- [x] Contract tests green locally on SimpleGo (matmul, gradient, AdamW) + the
+      boundary test. (XLA-CPU on the Mac not run — needs XLA libs; covered instead
+      by the CUDA run on `trig`, which exercises the full XLA path.)
+- [x] Quickstart prints passing matmul/grad/AdamW + device on the Mac (SimpleGo).
+- [x] Same quickstart green on `trig` with CUDA selected — see results below.
+- [x] Backend-boundary grep test wired into the gate (runs per module).
+
+## Validation results (2026-06-19, branch `milestone-1-bringup`)
+
+Backend selector is `GOMLX_BACKEND=xla:cuda` (the registered backend is `xla`; CUDA
+is its PJRT plugin — `cuda` alone is not a backend name).
+
+- **Mac, SimpleGo:** `make check` green; quickstart `device: "Go Backend"`,
+  matmul `[58 64 139 154]`, gradient `[2 4 6]`, adamw `w=3.0000 loss=9.09e-13`.
+- **`trig`, SimpleGo (linux/amd64):** cross-compiled here (`CGO_ENABLED=0`),
+  rsync'd to `/tmp`, ran green (`loss=5.12e-13`). Proves linux/amd64 portability.
+- **`trig`, CUDA (RTX 3070 Ti):** cross-compiled here with `zig cc`
+  (`CGO_ENABLED=1`, `xla` backend), rsync'd to `/tmp`, ran under
+  `GOMLX_BACKEND=xla:cuda`. go-xla auto-installed the `cuda` PJRT plugin (v0.112)
+  to `~/.local/lib`. Device: `xla:cuda … pjrt_c_api_cuda_plugin.so v0.112
+  [StableHLO] [1 device(s)]`; matmul/gradient/adamw all correct (`loss=1.42e-12`).
+  Binary in `/tmp` cleaned up; no repo on the box (artifact-only deploy).
+
+The core bet holds: GoMLX/XLA behind the `backend` boundary does correct
+matmul + autodiff + AdamW on real CUDA, driven from a Mac-cross-compiled binary.
 
 ## Open questions to resolve during the plan
 

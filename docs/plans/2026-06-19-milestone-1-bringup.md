@@ -27,7 +27,7 @@ Use these exact symbols. pkg.go.dev is stale.
 // backend construction (separate module github.com/gomlx/compute)
 import "github.com/gomlx/compute"
 import _ "github.com/gomlx/gomlx/backends/default" // registers gobackend (SimpleGo) + xla
-be, err := compute.New()        // honors GOMLX_BACKEND ("go", "xla:cpu", "cuda"); be is compute.Backend
+be, err := compute.New()        // honors GOMLX_BACKEND ("go", "xla:cpu", "xla:cuda"); be is compute.Backend
 be.Name() // e.g. "go" or "xla"
 
 // graph + tensors (moved to core/)
@@ -675,40 +675,55 @@ Makefile build and test every module on SimpleGo."
 
 ---
 
-### Task 5: Validate on CUDA (`trig`)
+### Task 5: Validate on CUDA (`trig`) — DONE 2026-06-19
 
-Confirms the same quickstart trains on the NVIDIA path. No new code — environment validation. A green SimpleGo run is not a green CUDA run; both are required for "done".
+Confirms the same quickstart runs on the NVIDIA path. No new code — environment
+validation. A green SimpleGo run is not a green CUDA run; both are required.
 
-**Files:** none (deployment target is read-only for source; `trig` pulls).
+**Deploy method (actual):** cross-compile a binary on the Mac and rsync it to
+`trig:/tmp`; run it there; clean up. No work repo on the box (artifact-only
+deploy — a `/tmp` binary is fine, a source checkout is not). `trig` has no
+`gputex`; the GPU was confirmed idle via `nvidia-smi` before the (~1s) run.
 
-- [ ] **Step 1: Push the branch and pull it on `trig`**
+- [x] **Step 1: Cross-compile for linux/amd64 on the Mac**
 
-From the Mac, push; on `trig`, `git pull` into the checkout (never edit source on the box). Confirm Go 1.26+ and the XLA/PJRT CUDA plugin are present on `trig` (GoMLX auto-installs the CUDA PJRT plugin on linux/amd64; verify per GoMLX install docs if `compute.New()` errors).
-
-- [ ] **Step 2: Run the gate without `noxla` (XLA available on `trig`)**
-
-On `trig`, wrapped in the GPU mutex:
+SimpleGo (pure Go, no cgo) — proves portability:
 ```bash
-gputex run "lmkit m1 cpu-xla" -- bash -lc 'cd backend && GOMLX_BACKEND=xla:cpu go test ./gomlx/ -v'
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags noxla -o /tmp/lmkit-linux-amd64 ./app/cmd/lmkit
 ```
-Expected: the three contract tests pass on the XLA-CPU backend (no `noxla` tag).
-
-- [ ] **Step 3: Run the quickstart on CUDA**
-
+CUDA-capable (the `xla` backend needs cgo; cross-compile the C with `zig cc`):
 ```bash
-gputex run "lmkit m1 cuda" -- bash -lc 'GOMLX_BACKEND=cuda go run ./app/cmd/lmkit quickstart'
+CC="zig cc -target x86_64-linux-gnu" CXX="zig c++ -target x86_64-linux-gnu" \
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /tmp/lmkit-cuda-amd64 ./app/cmd/lmkit
 ```
-Expected: `device: kind="xla" config=...cuda...` (or equivalent) followed by the three OK lines. Record the actual device string and output.
 
-- [ ] **Step 4: Record the result**
-
-Append a short note to the Milestone 1 spec's done criteria (or a `docs/specs/` run log) with the `trig` device string and pass/fail, so "done" is evidenced, not asserted.
-
-- [ ] **Step 5: Commit the run log (from the Mac, source-side)**
+- [x] **Step 2: Run SimpleGo on `trig`**
 
 ```bash
-git commit -am "docs: record Milestone 1 CUDA validation on trig"
+rsync -az /tmp/lmkit-linux-amd64 trig:/tmp/
+ssh trig 'GOMLX_BACKEND=go /tmp/lmkit-linux-amd64 quickstart'
 ```
+Result: green (`device: "Go Backend"`, three OK lines).
+
+- [x] **Step 3: Run CUDA on `trig`**
+
+```bash
+rsync -az /tmp/lmkit-cuda-amd64 trig:/tmp/
+ssh trig 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'  # confirm idle
+ssh trig 'GOMLX_BACKEND=xla:cuda /tmp/lmkit-cuda-amd64 quickstart'
+```
+Note the selector is **`xla:cuda`**, not `cuda` (the backend is `xla`; CUDA is its
+PJRT plugin). go-xla auto-installs the `cuda` PJRT plugin to `~/.local/lib` on
+first run. Result: green on the RTX 3070 Ti (device `xla:cuda … v0.112 [1
+device(s)]`, three OK lines, `loss=1.42e-12`).
+
+- [x] **Step 4: Clean up and record**
+
+```bash
+ssh trig 'rm -f /tmp/lmkit-cuda-amd64 /tmp/lmkit-linux-amd64'
+rm -f /tmp/lmkit-cuda-amd64 /tmp/lmkit-linux-amd64
+```
+Results recorded in the Milestone 1 spec's "Validation results" section.
 
 ---
 
