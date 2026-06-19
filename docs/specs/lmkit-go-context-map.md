@@ -34,7 +34,33 @@ a question of PJRT *plugins* (bridges to vendor kernels), not kernels.
 | **model** | Llama blocks (RMSNorm, RoPE, GQA attention, SwiGLU FFN, tied embeddings), config-driven. FlashAttention as an XLA op-graph. Expressed **only** in `backend` types. | — (pure domain) |
 | **train** | The loop: AdamW, grad accumulation, grad clip (global-norm), WSD schedule, periodic eval, checkpoint/resume, `metrics.jsonl`. | — |
 | **io** | safetensors read/write, GGUF export, HF Hub push. | file formats, HF API |
-| **cmd/lmkit** | CLI composition root: `shard`, `train`, `eval`, `quickstart`. | flag parsing |
+| **app** (`cmd/lmkit` + `internal/`) | CLI composition root: `shard`, `train`, `eval`, `quickstart`; lmkit-specific reproduction glue. | flag parsing |
+
+## Repository layout — per-package modules (ADR-0005)
+
+One repo, but each reusable context is its own Go module, tied by a root `go.work`
+and versioned independently (`module/vX.Y.Z` tags). This keeps the Go-native deps
+(ADR-0003) dependency-light: importing the pure-Go libs must not drag in XLA.
+
+```
+github.com/guygrigsby/lmkit-go/
+  go.work
+  tokenizer/    go.mod  (pure Go)
+  safetensors/  go.mod  (pure Go)
+  gguf/         go.mod  (pure Go)
+  hub/          go.mod  (net/http only)
+  data/         go.mod  (+edsrzf/mmap-go)
+  backend/      go.mod  (+gomlx/go-xla)
+  model/        go.mod  (+backend)
+  train/        go.mod  (+backend, +model)
+  io/           go.mod  (+safetensors, +gguf, +hub)
+  app/          go.mod  (cmd/lmkit + internal/ — lmkit-specific glue)
+```
+
+`internal/` exists **only** in the `app` module. Nothing general-purpose hides
+there — every reusable dep is a public package in its own module. The backend
+boundary (ADR-0002) holds at module granularity: only `backend` requires the
+vendor.
 
 ## The one non-negotiable rule: the backend boundary
 
@@ -135,5 +161,9 @@ PJRT-plugin revival** (ADR-0004), gated behind a working CUDA baseline.
 - ADR-0003 — Build dependencies in Go, not shell-outs.
 - ADR-0004 — Multi-GPU via PJRT plugins; Metal = revive the bridge; hand-written
   kernels deferred.
+- ADR-0005 — Per-package Go modules in a monorepo (reusable deps stay
+  dependency-light; `internal/` only in `app`).
+- ADR-0006 — Aggressive upgrade cadence (Go + all deps bumped often and
+  automatically; the named tax of a bleeding-edge stack).
 </content>
 </invoke>

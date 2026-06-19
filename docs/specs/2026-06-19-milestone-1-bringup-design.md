@@ -18,12 +18,16 @@ backend boundary.
 
 ## In scope
 
-- `go.mod` pinned to a specific GoMLX `main` commit (ADR-0001).
+- The monorepo skeleton per ADR-0005: root `go.work`, the **`backend` module**
+  (its `go.mod` pinned to a specific GoMLX `main` commit, ADR-0001), and the
+  **`app` module** (`cmd/lmkit` + `internal/`). Other modules are stubbed only as
+  later milestones need them — bring-up creates just `backend` and `app`.
 - The `backend` package: minimal domain types and the smallest interface that
   expresses matmul + gradient + optimizer-step + device selection.
-- One adapter, `backend/gomlx`, the only package importing `gomlx`/`go-xla`/PJRT.
-- A `cmd/lmkit quickstart` (or an example `main`) that runs the three checks and
-  prints results + selected device.
+- One adapter under the `backend` module, `backend/gomlx`, the only package
+  importing `gomlx`/`go-xla`/PJRT.
+- An `app` `cmd/lmkit quickstart` that runs the three checks and prints results +
+  selected device.
 - Tests:
   - matmul correctness vs a hand-computed small case;
   - gradient correctness vs finite-difference on a scalar function;
@@ -96,11 +100,12 @@ Per `DESIGN.md` validation philosophy — prove numerically before claiming it w
 
 ## Done criteria
 
-- [ ] `go.mod` pins a GoMLX `main` commit; `go build ./...` clean.
+- [ ] `go.work` + `backend` and `app` modules; `backend/go.mod` pins a GoMLX
+      `main` commit; both modules build clean.
 - [ ] All four tests green locally (SimpleGo + XLA-CPU).
 - [ ] Quickstart prints passing matmul/grad/AdamW + device on the Mac.
 - [ ] Same quickstart green on `trig` with the CUDA device selected.
-- [ ] Backend-boundary grep test wired into the gate.
+- [ ] Backend-boundary grep test wired into the gate (runs per module).
 
 ## Open questions to resolve during the plan
 
