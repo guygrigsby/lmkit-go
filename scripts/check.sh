@@ -7,5 +7,8 @@ for mod in backend model app; do
   ( cd "$mod" && go build -tags noxla ./... && GOMLX_BACKEND=go go test -tags noxla ./... )
 done
 echo "== boundary =="
-go test -tags noxla ./app/ -run TestBackendBoundary
+# -count=1: the boundary test shells out to `git grep`, which `go test` does not
+# track as a cache input, so a cached pass would hide a leak introduced in another
+# package. Force a real run every time.
+go test -count=1 -tags noxla ./app/ -run TestBackendBoundary
 echo "OK"

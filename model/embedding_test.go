@@ -45,13 +45,13 @@ func TestEmbeddingParity(t *testing.T) {
 	execL := g.MustNewExec(be.Compute(), func(table, ids *g.Node) *g.Node {
 		return model.EmbedLookup(table, ids)
 	})
-	gotEmbed := execL.MustExec1(fx.Weights["table"].ToTensor(), idsT)
+	gotEmbed := execL.MustCall1(fx.Weights["table"].ToTensor(), idsT)
 	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](gotEmbed), fx.ExpectedEmbed, 1e-5)
 
 	// Tied logits.
 	execT := g.MustNewExec(be.Compute(), func(h, table *g.Node) *g.Node {
 		return model.TiedLogits(h, table)
 	})
-	gotLogits := execT.MustExec1(fx.Inputs["h"].ToTensor(), fx.Weights["table"].ToTensor())
+	gotLogits := execT.MustCall1(fx.Inputs["h"].ToTensor(), fx.Weights["table"].ToTensor())
 	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](gotLogits), fx.ExpectedLogits, 1e-5)
 }

@@ -43,7 +43,7 @@ func TestForwardParity(t *testing.T) {
 		ids := g.Const(gr, f.Inputs["ids"].ToTensor())
 		return model.Forward(cfg, w, ids, positions)
 	})
-	out := exec.MustExec1()
+	out := exec.MustCall1()
 	// 5e-4: the full forward stacks N decoder layers (each ~10 matmuls + softmax) +
 	// final norm + tied projection in fp32, so absolute accumulation is deeper than a
 	// single layer. This bound exceeds the per-seed spread — a correct impl passes for

@@ -35,7 +35,7 @@ func TestAttentionParity(t *testing.T) {
 	exec := g.MustNewExec(be.Compute(), func(x, wq, wk, wv, wo *g.Node) *g.Node {
 		return model.Attention(cfg, x, wq, wk, wv, wo, positions)
 	})
-	out := exec.MustExec1(
+	out := exec.MustCall1(
 		f.Inputs["x"].ToTensor(),
 		f.Weights["Wq"].ToTensor(), f.Weights["Wk"].ToTensor(),
 		f.Weights["Wv"].ToTensor(), f.Weights["Wo"].ToTensor())

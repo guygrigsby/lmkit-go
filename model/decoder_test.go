@@ -43,7 +43,7 @@ func TestDecoderLayerParity(t *testing.T) {
 		h := g.Const(gr, f.Inputs["h"].ToTensor())
 		return model.DecoderLayer(cfg, h, lw, positions)
 	})
-	out := exec.MustExec1()
+	out := exec.MustCall1()
 	// 2e-4: a full decoder layer chains ~10 matmuls + softmax + residuals in fp32;
 	// the absolute parity diff varies with weight scale across seeds (a correct impl
 	// spanned 5.7e-6..6.1e-5 here). 2e-4 exceeds that spread so any seed passes iff

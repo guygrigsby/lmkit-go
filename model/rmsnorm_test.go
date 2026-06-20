@@ -21,6 +21,6 @@ func TestRMSNormParity(t *testing.T) {
 	exec := g.MustNewExec(be.Compute(), func(x, scale *g.Node) *g.Node {
 		return model.RMSNorm(x, scale, eps)
 	})
-	out := exec.MustExec1(f.Inputs["x"].ToTensor(), f.Weights["scale"].ToTensor())
+	out := exec.MustCall1(f.Inputs["x"].ToTensor(), f.Weights["scale"].ToTensor())
 	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 1e-5)
 }

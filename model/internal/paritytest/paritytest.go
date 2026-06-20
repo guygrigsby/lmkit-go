@@ -61,9 +61,14 @@ func Load(t *testing.T, path string) Fixture {
 	return f
 }
 
-// AssertClose fails if got and want differ by more than tol elementwise.
+// AssertClose fails if got and want differ by more than tol elementwise. want must
+// be a float fixture; comparing an integer (i32) fixture this way is a misuse —
+// integer outputs should be checked for exact equality, not closeness.
 func AssertClose(t *testing.T, got []float32, want Tensor, tol float32) {
 	t.Helper()
+	if want.DType == "i32" {
+		t.Fatalf("AssertClose: want is an i32 tensor; compare integer outputs for exact equality instead")
+	}
 	if len(got) != len(want.Data) {
 		t.Fatalf("length mismatch: got %d, want %d", len(got), len(want.Data))
 	}

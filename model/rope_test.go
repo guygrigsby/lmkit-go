@@ -27,6 +27,6 @@ func TestRoPEParity(t *testing.T) {
 	exec := g.MustNewExec(be.Compute(), func(x *g.Node) *g.Node {
 		return model.RoPE(x, positions, base, headDim)
 	})
-	out := exec.MustExec1(f.Inputs["x"].ToTensor())
+	out := exec.MustCall1(f.Inputs["x"].ToTensor())
 	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 1e-5)
 }

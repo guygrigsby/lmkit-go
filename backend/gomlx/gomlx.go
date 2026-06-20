@@ -46,7 +46,7 @@ func (b *Backend) MatMul(a, c backend.Tensor) (backend.Tensor, error) {
 	at := tensors.FromFlatDataAndDimensions(a.Data, a.Shape...)
 	ct := tensors.FromFlatDataAndDimensions(c.Data, c.Shape...)
 	exec := g.MustNewExec(b.be, func(x, y *g.Node) *g.Node { return g.MatMul(x, y) })
-	out := exec.MustExec1(at, ct)
+	out := exec.MustCall1(at, ct)
 	return backend.Tensor{
 		Shape: []int{a.Shape[0], c.Shape[1]},
 		Data:  tensors.MustCopyFlatData[float32](out),
@@ -59,7 +59,7 @@ func (b *Backend) GradSumSquares(x backend.Tensor) (backend.Tensor, error) {
 		sumSq := g.ReduceAllSum(g.Mul(n, n)) // scalar loss
 		return g.Gradient(sumSq, n)[0]       // d(sumSq)/dn = 2n
 	})
-	out := exec.MustExec1(xt)
+	out := exec.MustCall1(xt)
 	return backend.Tensor{Shape: x.Shape, Data: tensors.MustCopyFlatData[float32](out)}, nil
 }
 
