@@ -31,7 +31,7 @@ a question of PJRT *plugins* (bridges to vendor kernels), not kernels.
 | **backend** | The anti-corruption layer over XLA. Owns the domain types `Tensor`, `Device`, `DType` and the operations `model`/`train` need: build graph, run, gradient, optimizer-step. Selects device + PJRT plugin. | GoMLX / go-xla / PJRT |
 | **tokenizer** | Train and load a 32k BPE; encode/decode. Must load an existing HF `tokenizer.json`. | — (Go-native; see ADR-0003) |
 | **data** | corpus → `uint16` `.bin` shards; mmap `DataLoader` → `(x,y)` block batches; content-hash train/val split. | mmap, file layout |
-| **model** | Llama blocks (RMSNorm, RoPE, GQA attention, SwiGLU FFN, tied embeddings), config-driven. FlashAttention as an XLA op-graph. Expressed **only** in `backend` types. | — (pure domain) |
+| **model** | Llama blocks (RMSNorm, RoPE, GQA attention, SwiGLU FFN, tied embeddings), config-driven. FlashAttention as an XLA op-graph. Built in GoMLX `core/graph` ops (ADR-0009); no runtime/device imports. | GoMLX op vocabulary |
 | **train** | The loop: AdamW, grad accumulation, grad clip (global-norm), WSD schedule, periodic eval, checkpoint/resume, `metrics.jsonl`. | — |
 | **io** | safetensors read/write, GGUF export, HF Hub push. | file formats, HF API |
 | **app** (`cmd/lmkit` + `internal/`) | CLI composition root: `shard`, `train`, `eval`, `quickstart`; lmkit-specific reproduction glue. | flag parsing |
@@ -51,26 +51,30 @@ github.com/guygrigsby/lmkit-go/
   hub/          go.mod  (net/http only)
   data/         go.mod  (+edsrzf/mmap-go)
   backend/      go.mod  (+gomlx/go-xla)
-  model/        go.mod  (+backend)
-  train/        go.mod  (+backend, +model)
+  model/        go.mod  (+backend, +gomlx core/graph)
+  train/        go.mod  (+backend, +model, +gomlx core/graph)
   io/           go.mod  (+safetensors, +gguf, +hub)
   app/          go.mod  (cmd/lmkit + internal/ — lmkit-specific glue)
 ```
 
 `internal/` exists **only** in the `app` module. Nothing general-purpose hides
-there — every reusable dep is a public package in its own module. The backend
-boundary (ADR-0002) holds at module granularity: only `backend` requires the
-vendor.
+there — every reusable dep is a public package in its own module.
 
-## The one non-negotiable rule: the backend boundary
+## The one non-negotiable rule: the runtime boundary
 
-`backend` is the anti-corruption layer for the whole project. `model` and `train`
-depend on `backend`'s domain types and **never import `gomlx`, `go-xla`, or PJRT
-directly.** `backend` translates: our types in, vendor calls out, vendor results
-back to our types.
+`backend/gomlx/` is the anti-corruption layer for the **runtime**: backend
+construction (`compute.New`), device/PJRT-plugin selection, `go-xla`, execution,
+optimizer wiring, and checkpointing live there and nowhere else. This is the
+swappable, churn-prone, device-specific surface.
 
-Enforcement is a test: `grep -rE 'gomlx|go-xla|pjrt'` over the source tree returns
-hits **only** under `backend/`.
+Refined by ADR-0009 (supersedes ADR-0002's strict rule): `model` and `train` MAY
+import GoMLX's op/type vocabulary (`core/graph`, `core/tensors`, `compute/dtypes`,
+`compute/shapes`) to express layer math — building a parallel op-DSL behind the
+boundary was over-engineering. They must NOT import the runtime packages.
+
+Enforcement is a test: the **runtime** imports
+(`"github.com/gomlx/compute"`, `gomlx/backends`, `go-xla`, `pjrt`) appear **only**
+under `backend/gomlx/`. The op-vocabulary packages are allowed everywhere.
 
 Why it earns its keep here specifically:
 - The vendor stack is effectively one author and churns (gopjrt→go-xla rename, a
@@ -80,7 +84,7 @@ Why it earns its keep here specifically:
 - The three PJRT plugins (CUDA/ROCm/Metal) plug in behind one interface;
   `model`/`train` never know which GPU they run on.
 
-See ADR-0002.
+See ADR-0002 and ADR-0009.
 
 ## Ubiquitous language — collisions to fix in code
 
@@ -169,5 +173,8 @@ PJRT-plugin revival** (ADR-0004), gated behind a working CUDA baseline.
   vendor refactors in one place; the green gate is the merge bar for every bump).
 - ADR-0008 — Public API evolves additively (grow, don't remove; under-expose first;
   removals cost a major-version bump).
+- ADR-0009 — The boundary is the runtime, not the op vocabulary (`model`/`train`
+  may use GoMLX `core/graph` ops; backend construction/device/exec/optimizer/
+  checkpoint stay in `backend/`). Supersedes ADR-0002's strict grep rule.
 </content>
 </invoke>

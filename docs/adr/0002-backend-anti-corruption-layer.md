@@ -1,6 +1,8 @@
 # 2. The backend anti-corruption layer
 
-Status: accepted (2026-06-19)
+Status: accepted (2026-06-19). The strict "only `backend/**` imports gomlx" grep
+rule is superseded by ADR-0009 (the boundary is the runtime, not the op
+vocabulary); the runtime-centralization intent below stands.
 
 ## Context
 
