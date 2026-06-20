@@ -127,9 +127,9 @@ Prove correctness with tests, numerically, before claiming it works:
 
 ## Environment notes
 
-- Train on the home dual-GPU box `trig` (per the GPU-mutex rule, wrap GPU jobs
-  and don't stack them). The 3070 Ti (CUDA) is the natural first PJRT-CUDA
-  target; the R9700 is ROCm (PJRT ROCm support is the open question there).
-- Reuse the existing monitoring: emit lmkit-compatible `metrics.jsonl` so the
-  Grafana Workers dashboard + the forthcoming `lmkit` ops CLI manage gotrain
-  runs with zero extra work.
+- Train on a CUDA (NVIDIA/Linux) GPU host; a single ~8 GB card is enough for the
+  100M target. NVIDIA/CUDA is the natural first PJRT target; an AMD/ROCm card is a
+  later option (PJRT ROCm support is the open question there). Don't stack GPU jobs
+  — confirm the GPU is idle (`nvidia-smi`) and serialize per your environment.
+- Reuse existing monitoring: emit lmkit-compatible `metrics.jsonl` so a Grafana
+  dashboard + the `lmkit` ops CLI manage runs with zero extra work.
