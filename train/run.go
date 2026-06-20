@@ -1,6 +1,7 @@
 package train
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -71,15 +72,9 @@ func batchToTensors(b data.Batch, batchSize, blockSize int) (x, y *tensors.Tenso
 // into one resumable process. Returns an exit code: 0 on completion or SIGTERM, 2 on
 // non-finite loss.
 func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (int, error) {
-	// Signal handling: SIGTERM or SIGINT sets stop.
-	stop := false
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		<-sigCh
-		stop = true
-	}()
-	defer signal.Stop(sigCh)
+	// Signal handling: cancel context on SIGTERM or SIGINT (I2: avoids data race on plain bool).
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	// Output directory.
 	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
@@ -130,7 +125,11 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	evalExec := model.MustNewExec(bk.Compute(), store, noGradLossFn(mcfg, positions, computeDT))
 
 	// Track best val loss for best-checkpoint.
-	bestVal := math.MaxFloat64
+	// C1: on resume, restore prior best so we don't overwrite best/ with a worse model.
+	bestVal := priorBestVal(metricsPath)
+	if step == 0 {
+		bestVal = math.MaxFloat64
+	}
 
 	// Emit start or resume event.
 	eventKind := "start"
@@ -146,7 +145,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	batchTokens := cfg.BatchSize * trainLoader.BlockSize() * cfg.GradAccum // tokens per optimizer step
 
 	for int(step) < cfg.MaxSteps {
-		if stop {
+		if ctx.Err() != nil {
 			if err := saveCheckpoint(store, latestDir); err != nil {
 				return 1, fmt.Errorf("run: sigterm save: %w", err)
 			}
@@ -204,6 +203,9 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 			}
 		}
 
+		// Capture lr before step++ so the logged value matches what the optimizer used.
+		stepLR := getLR(int(step), cfg)
+
 		// One optimizer step.
 		t0 := time.Now()
 		stepLoss, gradNorm := stepper.Step(func() (*tensors.Tensor, *tensors.Tensor) {
@@ -212,12 +214,13 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 		})
 		stepDur := time.Since(t0)
 
-		// Non-finite loss: best-effort save (weights may be NaN — ignore panics),
-		// emit, exit 2. Use string for the loss value: json.Marshal rejects NaN.
+		// Non-finite loss: save diverged state to nan/ (NOT latest/) so latest/ stays
+		// resumable. Intentional deviation from the brief — keeps latest/ last-good.
 		if math.IsNaN(stepLoss) || math.IsInf(stepLoss, 0) {
+			nanDir := filepath.Join(cfg.OutDir, "nan")
 			func() {
 				defer func() { recover() }() //nolint:errcheck
-				_ = saveCheckpoint(store, latestDir)
+				_ = saveCheckpoint(store, nanDir)
 			}()
 			_ = emit(metricsPath, map[string]any{
 				"event": "nan",
@@ -245,7 +248,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 				"event":        "train",
 				"step":         step,
 				"train_loss":   stepLoss,
-				"lr":           getLR(int(step), cfg),
+				"lr":           stepLR, // M5: log the lr used this step, captured before step++
 				"grad_norm":    gradNorm,
 				"tok_per_sec":  tokPerSec,
 				"step_time_ms": stepDur.Milliseconds(),
@@ -280,7 +283,7 @@ func evalLoss(evalExec *model.Exec, valLoader *data.Loader, cfg Config, mcfg lmo
 	}
 	for i := 0; i < n; i++ {
 		b := valLoader.Next()
-		x, y := batchToTensors(b, cfg.BatchSize, valLoader.BlockSize())
+		x, y := batchToTensors(b, valLoader.BatchSize(), valLoader.BlockSize()) // M6: use loader's own BatchSize
 		out := evalExec.MustCall(x, y)
 		sum += shapes.ConvertTo[float64](out[0].Value())
 	}

@@ -1,7 +1,9 @@
 package train
 
 import (
+	"bufio"
 	"encoding/json"
+	"math"
 	"os"
 	"time"
 
@@ -58,4 +60,37 @@ func peakVRAMGB() float64 {
 // Formula: 6 * nParams * tokPerSec / 1e12 (the standard 6-FLOP-per-param estimate).
 func tflops(nParams int, tokPerSec float64) float64 {
 	return 6.0 * float64(nParams) * tokPerSec / 1e12
+}
+
+// PriorBestVal is the exported form of priorBestVal for use in tests.
+var PriorBestVal = priorBestVal
+
+// priorBestVal scans metricsPath for "eval" events and returns the minimum val_loss
+// seen. Returns math.MaxFloat64 if the file is absent, empty, or has no eval events.
+// Malformed lines and non-eval events are silently skipped.
+func priorBestVal(metricsPath string) float64 {
+	f, err := os.Open(metricsPath)
+	if err != nil {
+		return math.MaxFloat64
+	}
+	defer f.Close()
+	best := math.MaxFloat64
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			continue
+		}
+		if m["event"] != "eval" {
+			continue
+		}
+		vl, ok := m["val_loss"].(float64)
+		if !ok {
+			continue
+		}
+		if vl < best {
+			best = vl
+		}
+	}
+	return best
 }

@@ -193,8 +193,129 @@ func TestRunSmoke(t *testing.T) {
 	}
 }
 
+// TestPriorBestVal unit-tests the priorBestVal helper directly.
+func TestPriorBestVal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metrics.jsonl")
+
+	// No file yet: should return MaxFloat64.
+	got := train.PriorBestVal(path)
+	if got != 1.7976931348623157e+308 { // math.MaxFloat64
+		t.Errorf("missing file: got %v, want MaxFloat64", got)
+	}
+
+	// Write known eval lines plus a non-eval line.
+	lines := []string{
+		`{"event":"start","step":0}`,
+		`{"event":"eval","step":10,"val_loss":3.5}`,
+		`{"event":"train","step":10,"train_loss":3.2}`,
+		`{"event":"eval","step":20,"val_loss":2.8}`,
+		`{"event":"eval","step":30,"val_loss":3.1}`,
+	}
+	var content string
+	for _, l := range lines {
+		content += l + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got = train.PriorBestVal(path)
+	if got != 2.8 {
+		t.Errorf("priorBestVal: got %v, want 2.8", got)
+	}
+}
+
+// TestRunResumePreservesBest verifies that after a resume, bestVal is initialized
+// from the prior run's metrics.jsonl so a worse eval does not overwrite best/.
+//
+// Strategy: run phase1, forge a single eval line into metrics.jsonl with an
+// artificially low val_loss (0.001) after the real evals, so the best known
+// from priorBestVal is 0.001. On resume the real model loss (~4.x) must not be
+// flagged best=true. Without the fix, bestVal resets to MaxFloat64 and the first
+// resume eval is always best=true regardless of the actual loss.
+func TestRunResumePreservesBest(t *testing.T) {
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "out")
+	dataDir := filepath.Join(dir, "data")
+	_ = os.MkdirAll(dataDir, 0o755)
+
+	const blockSize = 8
+	cfg := runCfg(outDir, dataDir)
+	mcfg := tinyMCfg()
+	cfg.EvalInterval = 5
+	cfg.EvalIters = 2
+
+	makeL := func() (*data.Loader, *data.Loader) {
+		return makeLoaders(t, dataDir, blockSize, cfg.BatchSize)
+	}
+
+	// Phase 1: run 15 steps.
+	cfg.MaxSteps = 15
+	cfg.SaveInterval = 5
+	trainL, valL := makeL()
+	code, err := train.Run(cfg, mcfg, trainL, valL)
+	_ = trainL.Close()
+	_ = valL.Close()
+	if err != nil || code != 0 {
+		t.Fatalf("phase1: code=%d err=%v", code, err)
+	}
+
+	metricsPath := filepath.Join(outDir, "metrics.jsonl")
+	events1 := readEvents(t, metricsPath)
+	evalsBefore := eventsByKind(events1, "eval")
+	t.Logf("phase1 eval events: %d", len(evalsBefore))
+
+	// Forge a sentinel eval line with an extremely low val_loss = 0.001.
+	// This represents the "best ever" achieved before this resume.
+	// priorBestVal will return 0.001, and the real model loss (~4.x) must NOT
+	// be flagged best=true in phase 2 if bestVal is correctly restored.
+	sentinel := `{"event":"eval","step":14,"val_loss":0.001,"val_perplexity":1.001,"best":true}` + "\n"
+	f, ferr := os.OpenFile(metricsPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	_, _ = f.WriteString(sentinel)
+	f.Close()
+
+	prior := train.PriorBestVal(metricsPath)
+	if prior != 0.001 {
+		t.Fatalf("sentinel not picked up by priorBestVal: got %v", prior)
+	}
+	t.Logf("forged prior best val_loss = %.4f", prior)
+
+	// Phase 2: resume.
+	cfg.MaxSteps = 25
+	trainL, valL = makeL()
+	defer trainL.Close()
+	defer valL.Close()
+	code, err = train.Run(cfg, mcfg, trainL, valL)
+	if err != nil || code != 0 {
+		t.Fatalf("phase2: code=%d err=%v", code, err)
+	}
+
+	// Check all phase2 eval events: none should be marked best=true because
+	// the real model loss (~4.x) can never beat the forged 0.001 best.
+	events2 := readEvents(t, metricsPath)
+	evalsAfter := eventsByKind(events2, "eval")
+	// evalsAfter includes phase1 evals + sentinel + phase2 evals.
+	// phase2 evals come after len(evalsBefore)+1 (the +1 is the sentinel).
+	phase2Evals := evalsAfter[len(evalsBefore)+1:]
+	if len(phase2Evals) == 0 {
+		t.Fatal("phase2 produced no eval events; cannot verify bestVal restore")
+	}
+	for _, ev := range phase2Evals {
+		if ev["best"] == true {
+			vl := ev["val_loss"].(float64)
+			t.Errorf("phase2 eval marked best=true (val_loss=%.4f) but prior best was %.4f — bestVal not restored on resume", vl, prior)
+		}
+	}
+	t.Logf("phase2 eval events: %d; none incorrectly marked best — bestVal restore verified", len(phase2Evals))
+}
+
 // TestRunResume runs for 15 steps, then resumes with the same OutDir and verifies
-// it picks up from step 15 (not 0) and finishes cleanly.
+// it picks up from step 15 (not 0) and finishes cleanly. Also checks that the first
+// post-resume train_loss is continuous with the pre-restart trajectory (I3).
 func TestRunResume(t *testing.T) {
 	dir := t.TempDir()
 	outDir := filepath.Join(dir, "out")
@@ -220,6 +341,16 @@ func TestRunResume(t *testing.T) {
 		t.Fatalf("phase1 Run: code=%d err=%v", code, err)
 	}
 
+	// Capture last train_loss from phase 1.
+	metricsPath := filepath.Join(outDir, "metrics.jsonl")
+	events1 := readEvents(t, metricsPath)
+	trainEvts1 := eventsByKind(events1, "train")
+	var lastPhase1Loss float64
+	if len(trainEvts1) > 0 {
+		lastPhase1Loss = trainEvts1[len(trainEvts1)-1]["train_loss"].(float64)
+		t.Logf("phase1 last train_loss = %.4f", lastPhase1Loss)
+	}
+
 	// Phase 2: resume to MaxSteps=30.
 	cfg.MaxSteps = 30
 	trainL, valL = makeL()
@@ -230,19 +361,32 @@ func TestRunResume(t *testing.T) {
 		t.Fatalf("phase2 Run: code=%d err=%v", code, err)
 	}
 
-	// Check events include a "resume" event.
-	metricsPath := filepath.Join(outDir, "metrics.jsonl")
-	events := readEvents(t, metricsPath)
-	resumeEvts := eventsByKind(events, "resume")
+	// Check events include a "resume" event with step > 0.
+	events2 := readEvents(t, metricsPath)
+	resumeEvts := eventsByKind(events2, "resume")
 	if len(resumeEvts) == 0 {
 		t.Errorf("no resume event in metrics.jsonl after restart")
 	}
-	// The resume event should report step > 0.
 	if len(resumeEvts) > 0 {
 		resumeStep := resumeEvts[0]["step"].(float64)
 		t.Logf("resumed at step %.0f", resumeStep)
 		if resumeStep == 0 {
 			t.Errorf("resumed at step 0 (should be > 0)")
+		}
+	}
+
+	// I3: first post-resume train_loss must be continuous with pre-restart loss.
+	// A cold-restart would reset weights to random init (~ln(vocab)=ln(64)~4.16);
+	// a correct resume continues from where we left off.
+	trainEvts2 := eventsByKind(events2, "train")
+	phase2TrainEvts := trainEvts2[len(trainEvts1):]
+	if len(phase2TrainEvts) > 0 && lastPhase1Loss > 0 {
+		firstPhase2Loss := phase2TrainEvts[0]["train_loss"].(float64)
+		t.Logf("phase2 first train_loss = %.4f (phase1 last = %.4f)", firstPhase2Loss, lastPhase1Loss)
+		// A cold restart would produce loss near ln(vocab)=ln(64)~4.16 at step 0.
+		// A correct resume should be within 1.5x of where we left off.
+		if firstPhase2Loss > lastPhase1Loss*1.5 {
+			t.Errorf("first post-resume train_loss %.4f is >1.5x the pre-restart loss %.4f — possible cold restart", firstPhase2Loss, lastPhase1Loss)
 		}
 	}
 }
