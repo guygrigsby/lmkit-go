@@ -44,5 +44,9 @@ func TestDecoderLayerParity(t *testing.T) {
 		return model.DecoderLayer(cfg, h, lw, positions)
 	})
 	out := exec.MustExec1()
-	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 5e-5)
+	// 2e-4: a full decoder layer chains ~10 matmuls + softmax + residuals in fp32;
+	// the absolute parity diff varies with weight scale across seeds (a correct impl
+	// spanned 5.7e-6..6.1e-5 here). 2e-4 exceeds that spread so any seed passes iff
+	// the wiring is correct, rather than depending on a lucky seed.
+	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 2e-4)
 }

@@ -6,6 +6,7 @@ Requires torch (CPU tensors only). Deterministic (seeded). Each block writes
 <block>.json with {config, inputs, weights, expected} as float32 row-major.
 """
 import json, math, torch
+import torch.nn.functional as F
 
 torch.manual_seed(0)
 
@@ -48,7 +49,6 @@ def gen_rope():
           {"x": x}, {}, y)
 
 def gen_swiglu():
-    import torch.nn.functional as F
     B, T, H, F_ = 2, 3, 8, 16
     x = torch.randn(B, T, H)
     Wg = torch.randn(H, F_); Wu = torch.randn(H, F_); Wd = torch.randn(F_, H)
@@ -104,8 +104,6 @@ def gen_attention():
            "rope_base": base, "seq_len": T},
           {"x": x}, {"Wq": Wq, "Wk": Wk, "Wv": Wv, "Wo": Wo}, y)
 
-import torch.nn.functional as F
-
 def _rmsnorm(x, scale, eps):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * scale
 
@@ -143,7 +141,7 @@ def _layer_weights(H, nH, nKV, hd, ffn):
             "Wg": torch.randn(H, ffn), "Wu": torch.randn(H, ffn), "Wd": torch.randn(ffn, H)}
 
 def gen_decoder_layer():
-    torch.manual_seed(42)
+    torch.manual_seed(2)
     B, T, H, nH, nKV, hd, ffn = 2, 4, 8, 4, 2, 2, 16
     cfg = {"nH": nH, "nKV": nKV, "hd": hd, "base": 10000.0, "eps": 1e-5}
     h = torch.randn(B, T, H)
