@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,11 +18,23 @@ import (
 	"github.com/gomlx/gomlx/ml/model"
 	"github.com/gomlx/gomlx/ml/train/optimizer"
 
+	"github.com/guygrigsby/lmkit-go/backend"
 	gomlxbackend "github.com/guygrigsby/lmkit-go/backend/gomlx"
 	lmodel "github.com/guygrigsby/lmkit-go/model"
 
 	"github.com/guygrigsby/lmkit-go/data"
 )
+
+// wantBF16 reports whether bf16 compute should be used. M6 requires fp32 master
+// weights with bf16 compute on CUDA only; CPU and SimpleGo stay fp32. The device
+// is CUDA when its name/description mentions "cuda" (XLA's Description is
+// "xla:cuda - ..."; SimpleGo is "Go Backend", XLA CPU is "xla:cpu - ...").
+func wantBF16(dtype string, dev backend.Device) bool {
+	if dtype != "bfloat16" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(dev.Kind+" "+dev.Config), "cuda")
+}
 
 // nParams computes the total parameter count for the model (fp32 master weights only;
 // norm scales count as their dimension, projection weights as their product).
@@ -82,16 +95,17 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	}
 	metricsPath := filepath.Join(cfg.OutDir, "metrics.jsonl")
 
-	// Resolve compute dtype.
-	computeDT := dtypes.Float32
-	if cfg.Dtype == "bfloat16" {
-		computeDT = dtypes.BFloat16
-	}
-
 	// Build backend.
 	bk, err := gomlxbackend.New()
 	if err != nil {
 		return 1, fmt.Errorf("run: backend: %w", err)
+	}
+
+	// Resolve compute dtype. M6 mandates bf16 compute on CUDA, fp32 on CPU/SimpleGo:
+	// bf16 only takes effect when the device is CUDA, regardless of cfg.Dtype.
+	computeDT := dtypes.Float32
+	if wantBF16(cfg.Dtype, bk.Device()) {
+		computeDT = dtypes.BFloat16
 	}
 
 	// Store + deterministic seed.
