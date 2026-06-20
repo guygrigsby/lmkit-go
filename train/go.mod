@@ -3,13 +3,16 @@ module github.com/guygrigsby/lmkit-go/train
 go 1.26
 
 require (
+	github.com/NVIDIA/go-nvml v0.13.2-0
 	github.com/gomlx/compute v0.0.0-20260615181056-6e3a924a46cb
 	github.com/gomlx/gomlx v0.27.4-0.20260619070802-516689cbe913
 	github.com/guygrigsby/lmkit-go/backend v0.0.0-00010101000000-000000000000
+	github.com/guygrigsby/lmkit-go/data v0.0.0-00010101000000-000000000000
 	github.com/guygrigsby/lmkit-go/model v0.0.0-00010101000000-000000000000
 )
 
 require (
+	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gomlx/go-xla v0.2.3-0.20260619070432-1b52f9e79214 // indirect
@@ -24,5 +27,6 @@ require (
 
 replace (
 	github.com/guygrigsby/lmkit-go/backend => ../backend
+	github.com/guygrigsby/lmkit-go/data => ../data
 	github.com/guygrigsby/lmkit-go/model => ../model
 )
