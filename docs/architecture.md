@@ -74,7 +74,7 @@ flowchart TB
 
   SIG["SIGTERM / SIGINT"] -. clean .-> SAVEEXIT["save latest · exit 0"]
   CKQ -. latest/best/step_NNNNNN .-> OUT["checkpoints/ + metrics.jsonl → Grafana / ops CLI"]
-  LOG -. .-> OUT
+  LOG -.-> OUT
 ```
 
 Mechanics mirror `lmkit.pretrain` + `lmkit.training` exactly; the loop is
