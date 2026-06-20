@@ -47,6 +47,16 @@ def gen_rope():
     write("rope", {"head_dim": hd, "rope_base": base, "seq_len": T},
           {"x": x}, {}, y)
 
+def gen_swiglu():
+    import torch.nn.functional as F
+    B, T, H, F_ = 2, 3, 8, 16
+    x = torch.randn(B, T, H)
+    Wg = torch.randn(H, F_); Wu = torch.randn(H, F_); Wd = torch.randn(F_, H)
+    y = (F.silu(x @ Wg) * (x @ Wu)) @ Wd
+    write("swiglu", {"hidden": H, "ffn_hidden": F_},
+          {"x": x}, {"Wg": Wg, "Wu": Wu, "Wd": Wd}, y)
+
 if __name__ == "__main__":
     gen_rmsnorm()
     gen_rope()
+    gen_swiglu()
