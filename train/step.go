@@ -3,7 +3,6 @@ package train
 import (
 	"path"
 
-	"github.com/gomlx/compute"
 	"github.com/gomlx/compute/dtypes"
 	"github.com/gomlx/compute/shapes"
 	g "github.com/gomlx/gomlx/core/graph"
@@ -14,6 +13,7 @@ import (
 	"github.com/gomlx/gomlx/ml/train/loss"
 	"github.com/gomlx/gomlx/ml/train/optimizer"
 
+	gomlxbackend "github.com/guygrigsby/lmkit-go/backend/gomlx"
 	lmodel "github.com/guygrigsby/lmkit-go/model"
 )
 
@@ -63,14 +63,17 @@ type Stepper struct {
 }
 
 // NewStepper builds the accumulate/apply Execs and returns a Stepper.
-// be is the compute backend (from gomlx.New().Compute()), store holds all variables.
+// bk is the backend wrapper (the runtime stays behind the anti-corruption seam;
+// .Compute() is the only runtime reference and is passed straight to model.NewExec).
+// gradClip is the global-norm clip threshold (lm-100m uses 1.0). store holds all variables.
 // opt must implement gomlxtrain.OptimizeWithGradients (both Adam and SGD do).
 func NewStepper(
-	be compute.Backend,
+	bk *gomlxbackend.Backend,
 	store *model.Store,
 	mcfg lmodel.Config,
 	positions []int,
 	gradAccum int,
+	gradClip float64,
 	opt optimizer.Interface,
 	computeDT dtypes.DType,
 ) *Stepper {
@@ -116,7 +119,7 @@ func NewStepper(
 			}
 
 			// Global-norm clip then apply with AdamW.
-			clipped := clipByGlobalNorm(grads, 1.0) // clip=1 matches standard LLM training
+			clipped := clipByGlobalNorm(grads, gradClip)
 			owg.UpdateGraphWithGradients(scope, clipped, dtypes.Float32)
 
 			// Zero all accumulators.
@@ -132,6 +135,7 @@ func NewStepper(
 		}
 	}
 
+	be := bk.Compute() // sole runtime reference; handed straight to model.NewExec
 	accOnly := model.MustNewExec(be, store, buildGraph(false))
 	accApply := model.MustNewExec(be, store, buildGraph(true))
 

@@ -23,7 +23,6 @@ func TestStepDescends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backend: %v", err)
 	}
-	be := bk.Compute()
 
 	store := model.NewStore()
 
@@ -41,7 +40,7 @@ func TestStepDescends(t *testing.T) {
 	)
 
 	opt := optimizer.Adam().WeightDecay(weightDecay).LearningRate(lr).Done()
-	s := train.NewStepper(be, store, cfg, positions, gradAccum, opt, dtypes.Float32)
+	s := train.NewStepper(bk, store, cfg, positions, gradAccum, 1.0, opt, dtypes.Float32)
 
 	var startLoss, endLoss float64
 	for i := 0; i < steps; i++ {

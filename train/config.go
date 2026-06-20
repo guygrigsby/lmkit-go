@@ -64,5 +64,3 @@ func getLR(step int, c Config) float64 {
 	coeff := 0.5 * (1.0 + math.Cos(math.Pi*progress))
 	return c.MinLR + coeff*(c.LR-c.MinLR)
 }
-
-var _ = json.Marshal // keep encoding/json imported if unused elsewhere
