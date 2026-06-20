@@ -72,8 +72,41 @@ def gen_embedding():
         json.dump(obj, f)
     print("wrote embedding.json")
 
+def gen_attention():
+    B, T, H = 2, 4, 8
+    nH, nKV, hd, base = 4, 2, 2, 10000.0   # H == nH*hd; nH % nKV == 0
+    x = torch.randn(B, T, H)
+    Wq = torch.randn(H, nH * hd); Wk = torch.randn(H, nKV * hd)
+    Wv = torch.randn(H, nKV * hd); Wo = torch.randn(nH * hd, H)
+    positions = torch.arange(T)
+    inv_freq = 1.0 / (base ** (torch.arange(0, hd, 2).float() / hd))
+    emb = torch.cat([positions[:, None].float() * inv_freq[None, :]] * 2, dim=-1)
+    cos = emb.cos()[None, :, None, :]; sin = emb.sin()[None, :, None, :]
+    def rot(t):
+        a, b = t[..., : hd // 2], t[..., hd // 2 :]
+        return torch.cat([-b, a], dim=-1)
+    q = (x @ Wq).view(B, T, nH, hd)
+    k = (x @ Wk).view(B, T, nKV, hd)
+    v = (x @ Wv).view(B, T, nKV, hd)
+    q = q * cos + rot(q) * sin
+    k = k * cos + rot(k) * sin
+    rep = nH // nKV
+    k = k.repeat_interleave(rep, dim=2)   # [B,T,nH,hd]
+    v = v.repeat_interleave(rep, dim=2)
+    q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)  # [B,nH,T,hd]
+    scores = (q @ k.transpose(-1, -2)) / math.sqrt(hd)                   # [B,nH,T,T]
+    mask = torch.triu(torch.full((T, T), float("-inf")), diagonal=1)
+    probs = (scores + mask).softmax(-1)
+    out = (probs @ v).transpose(1, 2).reshape(B, T, nH * hd)             # [B,T,nH*hd]
+    y = out @ Wo                                                         # [B,T,H]
+    write("attention",
+          {"hidden": H, "n_heads": nH, "n_kv_heads": nKV, "head_dim": hd,
+           "rope_base": base, "seq_len": T},
+          {"x": x}, {"Wq": Wq, "Wk": Wk, "Wv": Wv, "Wo": Wo}, y)
+
 if __name__ == "__main__":
     gen_rmsnorm()
     gen_rope()
     gen_swiglu()
     gen_embedding()
+    gen_attention()
