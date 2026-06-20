@@ -12,20 +12,30 @@ import (
 	"github.com/gomlx/gomlx/core/tensors"
 )
 
-// Tensor is a fixture tensor: row-major float32 data plus its shape.
-// Data is always float32, even for integer fixtures (e.g. token ids): the
-// generator serializes ids as float32 and consumers cast back with int32(v).
-// This is exact only for integers below 2^24; goldens with ids/indices above
-// that range need an integer path added here (a concern for the full-model
-// milestone, not the per-block blocks).
+// Tensor is a fixture tensor: row-major data plus its shape. Data is JSON-native
+// float64; ToTensor casts to the tensor dtype. DType "" or "f32" => float32;
+// "i32" => int32 (for token ids / indices, which must round-trip exactly — float32
+// would truncate ids above 2^24).
 type Tensor struct {
 	Shape []int     `json:"shape"`
-	Data  []float32 `json:"data"`
+	DType string    `json:"dtype,omitempty"`
+	Data  []float64 `json:"data"`
 }
 
-// ToTensor builds a GoMLX tensor from the fixture tensor.
+// ToTensor builds a GoMLX tensor of the fixture's dtype.
 func (tn Tensor) ToTensor() *tensors.Tensor {
-	return tensors.FromFlatDataAndDimensions(tn.Data, tn.Shape...)
+	if tn.DType == "i32" {
+		d := make([]int32, len(tn.Data))
+		for i, v := range tn.Data {
+			d[i] = int32(v)
+		}
+		return tensors.FromFlatDataAndDimensions(d, tn.Shape...)
+	}
+	d := make([]float32, len(tn.Data))
+	for i, v := range tn.Data {
+		d[i] = float32(v)
+	}
+	return tensors.FromFlatDataAndDimensions(d, tn.Shape...)
 }
 
 // Fixture is one block's golden: config scalars, named inputs and weights, and
@@ -59,7 +69,7 @@ func AssertClose(t *testing.T, got []float32, want Tensor, tol float32) {
 	}
 	var maxDiff float32
 	for i := range got {
-		d := float32(math.Abs(float64(got[i] - want.Data[i])))
+		d := float32(math.Abs(float64(got[i]) - want.Data[i]))
 		if d > maxDiff {
 			maxDiff = d
 		}

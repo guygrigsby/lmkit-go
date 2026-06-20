@@ -6,6 +6,7 @@ package model
 // are read by that block.
 type Config struct {
 	Hidden    int
+	NLayers   int
 	NHeads    int
 	NKVHeads  int
 	HeadDim   int
