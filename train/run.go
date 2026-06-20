@@ -98,9 +98,11 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	store := model.NewStore()
 	store.RootScope().SetParam(model.ParamInitialSeed, cfg.Seed)
 
-	// Build optimizer.
+	// Build optimizer. Weight decay is NOT set on Adam here: GoMLX applies a single
+	// WeightDecay scalar to every trainable variable with no rank filter, but the
+	// baseline decays 2-D+ params only (norm scales/1-D excluded). The stepper applies
+	// decoupled AdamW weight decay to rank>=2 params instead (see NewStepper).
 	opt := optimizer.Adam().
-		WeightDecay(cfg.WeightDecay).
 		Betas(cfg.Beta1, cfg.Beta2).
 		LearningRate(getLR(0, cfg)).
 		Done()
@@ -119,7 +121,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	}
 
 	// Build stepper.
-	stepper := NewStepper(bk, store, mcfg, positions, cfg.GradAccum, cfg.GradClip, opt, computeDT)
+	stepper := NewStepper(bk, store, mcfg, positions, cfg.GradAccum, cfg.GradClip, cfg.WeightDecay, opt, computeDT)
 
 	// Build eval exec (no gradients).
 	evalExec := model.MustNewExec(bk.Compute(), store, noGradLossFn(mcfg, positions, computeDT))

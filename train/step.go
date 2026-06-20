@@ -68,7 +68,10 @@ type Stepper struct {
 // bk is the backend wrapper (the runtime stays behind the anti-corruption seam;
 // .Compute() is the only runtime reference and is passed straight to model.NewExec).
 // gradClip is the global-norm clip threshold (lm-100m uses 1.0). store holds all variables.
-// opt must implement gomlxtrain.OptimizeWithGradients (both Adam and SGD do).
+// weightDecay is the decoupled AdamW weight decay applied to rank>=2 params ONLY (norm
+// scales and other 1-D params are excluded, matching the baseline's param-group split).
+// The optimizer itself must be built WITHOUT WeightDecay (GoMLX would apply it to every
+// variable). opt must implement gomlxtrain.OptimizeWithGradients (both Adam and SGD do).
 func NewStepper(
 	bk *gomlxbackend.Backend,
 	store *model.Store,
@@ -76,6 +79,7 @@ func NewStepper(
 	positions []int,
 	gradAccum int,
 	gradClip float64,
+	weightDecay float64,
 	opt optimizer.Interface,
 	computeDT dtypes.DType,
 ) *Stepper {
@@ -127,6 +131,22 @@ func NewStepper(
 		// Global-norm clip, capturing the pre-clip norm for the metric.
 		clipped, normNode := clipByGlobalNormWithNorm(grads, gradClip)
 		owg.UpdateGraphWithGradients(scope, clipped, dtypes.Float32)
+
+		// Decoupled AdamW weight decay on rank>=2 params only (norm scales / 1-D
+		// params excluded, matching the baseline). Applied to the post-Adam weights:
+		// w *= (1 - lr*wd). The per-step lr is read from the optimizer's learning_rate
+		// variable (created by UpdateGraphWithGradients above, so it exists here). The
+		// lr*lr*wd difference from decaying w_old first is O(lr^2) and negligible.
+		if weightDecay > 0 {
+			lrNode := optimizer.LearningRateVar(scope, dtypes.Float32, 0).NodeValue(gr)
+			factor := g.Sub(g.Const(gr, float32(1)), g.MulScalar(lrNode, weightDecay))
+			for v := range scope.IterVariables() {
+				if !v.Trainable || !v.InUseByGraph(gr) || v.Shape().Rank() < 2 {
+					continue
+				}
+				v.SetNodeValue(g.Mul(v.NodeValue(gr), factor))
+			}
+		}
 
 		// Zero all accumulators.
 		for v := range scope.IterVariables() {
