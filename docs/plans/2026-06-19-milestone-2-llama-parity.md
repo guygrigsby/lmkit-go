@@ -44,6 +44,25 @@ x.Shape().Dimensions  // []int ; x.Rank() int
 
 Exec (in `*_test.go` only): `exec := g.MustNewExec(be, func(a, b *g.Node) *g.Node {...}); out := exec.MustExec1(aT, bT)` where `be` comes from `gomlx.New().Compute()` and `aT,bT` are `*tensors.Tensor`.
 
+## Golden generation procedure (PyTorch lives on `trig`, not the Mac)
+
+The Mac has no PyTorch. `trig` has it in `~/venvs/cuda/bin/python` (torch 2.12.1;
+CPU tensors only, so the cuda vs rocm venv is irrelevant). The generator script is
+maintained in the repo on the Mac; goldens are generated on `trig` and the JSON
+artifacts copied back (artifacts in `/tmp` are fine; no work repo on the box).
+Whenever a task says "regenerate goldens", run this from the repo root on the Mac:
+
+```bash
+scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
+ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'   # writes /tmp/<block>.json
+scp trig:/tmp/<block>.json model/testdata/                     # copy back the block(s) this task added
+ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'               # clean up the box
+```
+
+The script regenerates every block present in its `__main__` on each run; copy back
+only the fixture(s) the current task introduces. Fixtures are deterministic (seeded
+torch), so re-running yields byte-identical JSON.
+
 ---
 
 ### Task 1: Revise the boundary test to the runtime boundary (ADR-0009)
@@ -271,8 +290,8 @@ func AssertClose(t *testing.T, got []float32, want Tensor, tol float32) {
 #!/usr/bin/env python3
 """Generate JSON golden fixtures for lmkit-go model block parity tests.
 
-Run from the model/testdata/ directory: `python3 gen_goldens.py`.
-Requires torch (CPU is fine). Deterministic (seeded). Each block writes
+Runs on trig: `~/venvs/cuda/bin/python gen_goldens.py` (the Mac has no torch).
+Requires torch (CPU tensors only). Deterministic (seeded). Each block writes
 <block>.json with {config, inputs, weights, expected} as float32 row-major.
 """
 import json, math, torch
@@ -304,8 +323,15 @@ def gen_rmsnorm():
 if __name__ == "__main__":
     gen_rmsnorm()
 ```
-Run: `cd model/testdata && python3 -c "import torch; print(torch.__version__)" && python3 gen_goldens.py`
-Expected: prints a torch version and `wrote rmsnorm.json`. If `import torch` fails, STOP and report — the generator environment must be resolved (per the spec's open question).
+Run the golden-generation procedure (above) to produce `rmsnorm.json` on `trig` and
+copy it back:
+```bash
+scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
+ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
+scp trig:/tmp/rmsnorm.json model/testdata/
+ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+```
+Expected: `trig` prints `wrote rmsnorm.json`; `model/testdata/rmsnorm.json` exists locally.
 
 - [ ] **Step 6: Write the failing RMSNorm parity test**
 
@@ -424,7 +450,15 @@ def gen_rope():
     write("rope", {"head_dim": hd, "rope_base": base, "seq_len": T},
           {"x": x}, {}, y)
 ```
-Add `gen_rope()` to the `__main__` block. Run: `cd model/testdata && python3 gen_goldens.py` → `wrote rope.json`.
+Add `gen_rope()` to the `__main__` block. Regenerate via the golden-generation
+procedure (above), copying back `rope.json`:
+```bash
+scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
+ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
+scp trig:/tmp/rope.json model/testdata/
+ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+```
+Expected: `model/testdata/rope.json` exists locally.
 
 - [ ] **Step 2: Write the failing RoPE parity test**
 
@@ -547,7 +581,8 @@ def gen_swiglu():
     write("swiglu", {"hidden": H, "ffn_hidden": F_},
           {"x": x}, {"Wg": Wg, "Wu": Wu, "Wd": Wd}, y)
 ```
-Run: `cd model/testdata && python3 gen_goldens.py` → `wrote swiglu.json`.
+Regenerate via the golden-generation procedure (above), copying back `swiglu.json`
+(`scp trig:/tmp/swiglu.json model/testdata/`).
 
 - [ ] **Step 2: Write the failing test**
 
@@ -657,7 +692,8 @@ def gen_embedding():
         json.dump(obj, f)
     print("wrote embedding.json")
 ```
-Run → `wrote embedding.json`. (`ids` are int32; `t2j` casts to float32 for JSON — the Go test converts back to int32 when building the index tensor; see Step 3.)
+Regenerate via the golden-generation procedure (above), copying back
+`embedding.json` (`scp trig:/tmp/embedding.json model/testdata/`). (`ids` are int32; `t2j` casts to float32 for JSON — the Go test converts back to int32 when building the index tensor; see Step 3.)
 
 - [ ] **Step 2: Write the failing test**
 
@@ -807,7 +843,8 @@ def gen_attention():
            "rope_base": base, "seq_len": T},
           {"x": x}, {"Wq": Wq, "Wk": Wk, "Wv": Wv, "Wo": Wo}, y)
 ```
-Run → `wrote attention.json`.
+Regenerate via the golden-generation procedure (above), copying back
+`attention.json` (`scp trig:/tmp/attention.json model/testdata/`).
 
 - [ ] **Step 2: Write the failing test**
 
