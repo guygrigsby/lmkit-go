@@ -33,6 +33,20 @@ func TestMatMul(t *testing.T) {
 	}
 }
 
+// TestMatMulShapeMismatch pins that a caller-supplied inner-dim mismatch returns
+// an error rather than panicking out of GoMLX's Must* path.
+func TestMatMulShapeMismatch(t *testing.T) {
+	be, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := backend.Tensor{Shape: []int{2, 3}, Data: []float32{1, 2, 3, 4, 5, 6}}
+	b := backend.Tensor{Shape: []int{4, 2}, Data: []float32{1, 2, 3, 4, 5, 6, 7, 8}} // inner 3 != 4
+	if _, err := be.MatMul(a, b); err == nil {
+		t.Fatal("MatMul with mismatched inner dims: want error, got nil")
+	}
+}
+
 func TestGradSumSquares(t *testing.T) {
 	be, err := New()
 	if err != nil {

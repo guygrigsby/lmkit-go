@@ -39,31 +39,43 @@ func (b *Backend) Device() backend.Device {
 	return backend.Device{Kind: b.be.Name(), Config: b.be.Description()}
 }
 
-func (b *Backend) MatMul(a, c backend.Tensor) (backend.Tensor, error) {
+// recoverErr converts a GoMLX Must*-call panic (e.g. shape mismatch during graph
+// tracing) into a returned error, so caller-supplied bad input does not crash the
+// process. Use as `defer recoverErr(&err, "MatMul")` with a named error return.
+func recoverErr(err *error, where string) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("backend/gomlx: %s: %v", where, r)
+	}
+}
+
+func (b *Backend) MatMul(a, c backend.Tensor) (out backend.Tensor, err error) {
+	defer recoverErr(&err, "MatMul")
 	if len(a.Shape) != 2 || len(c.Shape) != 2 {
 		return backend.Tensor{}, fmt.Errorf("backend/gomlx: MatMul wants 2-D, got %v and %v", a.Shape, c.Shape)
 	}
 	at := tensors.FromFlatDataAndDimensions(a.Data, a.Shape...)
 	ct := tensors.FromFlatDataAndDimensions(c.Data, c.Shape...)
 	exec := g.MustNewExec(b.be, func(x, y *g.Node) *g.Node { return g.MatMul(x, y) })
-	out := exec.MustCall1(at, ct)
+	res := exec.MustCall1(at, ct)
 	return backend.Tensor{
 		Shape: []int{a.Shape[0], c.Shape[1]},
-		Data:  tensors.MustCopyFlatData[float32](out),
+		Data:  tensors.MustCopyFlatData[float32](res),
 	}, nil
 }
 
-func (b *Backend) GradSumSquares(x backend.Tensor) (backend.Tensor, error) {
+func (b *Backend) GradSumSquares(x backend.Tensor) (out backend.Tensor, err error) {
+	defer recoverErr(&err, "GradSumSquares")
 	xt := tensors.FromFlatDataAndDimensions(x.Data, x.Shape...)
 	exec := g.MustNewExec(b.be, func(n *g.Node) *g.Node {
 		sumSq := g.ReduceAllSum(g.Mul(n, n)) // scalar loss
 		return g.Gradient(sumSq, n)[0]       // d(sumSq)/dn = 2n
 	})
-	out := exec.MustCall1(xt)
-	return backend.Tensor{Shape: x.Shape, Data: tensors.MustCopyFlatData[float32](out)}, nil
+	res := exec.MustCall1(xt)
+	return backend.Tensor{Shape: x.Shape, Data: tensors.MustCopyFlatData[float32](res)}, nil
 }
 
-func (b *Backend) FitConstant(target float32, steps int, weightDecay float64) (float32, float32, error) {
+func (b *Backend) FitConstant(target float32, steps int, weightDecay float64) (w, finalLoss float32, err error) {
+	defer recoverErr(&err, "FitConstant")
 	// Inputs are all ones, labels all `target`; with a no-bias 1-unit Dense,
 	// y = w*1, so MSE drives the single weight w -> target.
 	const n = 64
@@ -96,8 +108,8 @@ func (b *Backend) FitConstant(target float32, steps int, weightDecay float64) (f
 		return 0, 0, fmt.Errorf("backend/gomlx: train: %w", err)
 	}
 
-	w := tensors.MustCopyFlatData[float32](store.GetVariable("/dense/weights").MustValue())[0]
-	finalLoss := (w - target) * (w - target) // MSE of y=w*1 vs target, computed in Go
+	w = tensors.MustCopyFlatData[float32](store.GetVariable("/dense/weights").MustValue())[0]
+	finalLoss = (w - target) * (w - target) // MSE of y=w*1 vs target, computed in Go
 	return w, finalLoss, nil
 }
 
