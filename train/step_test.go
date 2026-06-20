@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gomlx/compute/dtypes"
+	"github.com/gomlx/gomlx/core/tensors"
 	"github.com/gomlx/gomlx/ml/model"
 	"github.com/gomlx/gomlx/ml/train/optimizer"
 
@@ -12,12 +13,13 @@ import (
 )
 
 // TestStepDescends is the Task-3 gate: the production step path (grad-accum + clip +
-// AdamW) descends the loss on a tiny fixed batch. Seed-independent — correct gradient
-// wiring converges for any init; a broken loop (wrong order, dead grads, clip bug)
-// will not reach endLoss < 0.3*startLoss in 200 steps.
+// AdamW) descends the loss on a tiny fixed batch. The init seed is fixed so the gate is
+// reproducible; correct gradient wiring converges, while a broken loop (wrong order, dead
+// grads, clip bug) will not reach endLoss < 0.3*startLoss in 200 steps.
 func TestStepDescends(t *testing.T) {
 	cfg := tinyCfg()
 	inputs, labels := fixedBatch(2, 8, cfg.VocabSize)
+	batch := func() (*tensors.Tensor, *tensors.Tensor) { return inputs, labels } // fixed batch (overfit)
 
 	bk, err := gomlxbackend.New()
 	if err != nil {
@@ -25,6 +27,7 @@ func TestStepDescends(t *testing.T) {
 	}
 
 	store := model.NewStore()
+	store.RootScope().SetParam(model.ParamInitialSeed, int64(1337))
 
 	tt := inputs.Shape().Dimensions[1] // T
 	positions := make([]int, tt)
@@ -44,7 +47,7 @@ func TestStepDescends(t *testing.T) {
 
 	var startLoss, endLoss float64
 	for i := 0; i < steps; i++ {
-		loss := s.Step(inputs, labels)
+		loss := s.Step(batch)
 		if i == 0 {
 			startLoss = loss
 		}

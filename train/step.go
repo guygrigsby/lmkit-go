@@ -146,13 +146,18 @@ func NewStepper(
 	}
 }
 
-// Step runs one optimizer step: (GradAccum-1) accumulate calls then one apply call.
-// x is [B,T] int32 token ids; y is [B,T,1] int32 next-token ids.
-// Returns the loss from the apply micro-batch.
-func (s *Stepper) Step(x, y *tensors.Tensor) float64 {
+// Step runs one optimizer step: it pulls GradAccum micro-batches from next, accumulating
+// gradients over the first GradAccum-1 and accumulate-then-applying on the last. Each call
+// to next must return a distinct micro-batch — x is [B,T] int32 token ids, y is [B,T,1]
+// int32 next-token ids. Returning the same batch every call is valid (e.g. to overfit a
+// fixed batch) but then accumulation averages identical gradients; a real effective-batch
+// benefit requires next to yield different data each call. Returns the apply micro-batch loss.
+func (s *Stepper) Step(next func() (x, y *tensors.Tensor)) float64 {
 	for i := 0; i < s.gradAccum-1; i++ {
+		x, y := next()
 		s.accOnly.MustCall(x, y)
 	}
+	x, y := next()
 	out := s.accApply.MustCall(x, y)
 	return shapes.ConvertTo[float64](out[0].Value())
 }
