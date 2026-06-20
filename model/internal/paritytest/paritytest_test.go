@@ -9,7 +9,7 @@ import (
 // A token id well above 2^24 must round-trip exactly through the fixture path
 // (float32 would have truncated it).
 func TestIntTensorRoundTrip(t *testing.T) {
-	const big = 5_000_001 // > 2^22, not float32-exact in general
+	const big = 16_777_217 // 2^24 + 1: smallest int not exactly representable as float32
 	tn := Tensor{Shape: []int{1, 2}, DType: "i32", Data: []float64{big, 7}}
 	got := tensors.MustCopyFlatData[int32](tn.ToTensor())
 	if got[0] != big || got[1] != 7 {
