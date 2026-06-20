@@ -101,5 +101,10 @@ func (b *Backend) FitConstant(target float32, steps int, weightDecay float64) (f
 	return w, finalLoss, nil
 }
 
+// Compute returns the underlying compute backend for tests and one-shot graph
+// evaluation. Callers that take it never import the runtime package by name
+// (the type is inferred), keeping the ADR-0009 boundary intact.
+func (b *Backend) Compute() compute.Backend { return b.be }
+
 // compile-time check that the adapter satisfies the boundary.
 var _ backend.Backend = (*Backend)(nil)
