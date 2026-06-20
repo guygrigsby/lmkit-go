@@ -12,13 +12,21 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "quickstart" {
-		fmt.Fprintln(os.Stderr, "usage: lmkit quickstart")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: lmkit <quickstart|train> ...")
 		os.Exit(2)
 	}
-	if err := quickstart(); err != nil {
-		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
-		os.Exit(1)
+	switch os.Args[1] {
+	case "quickstart":
+		if err := quickstart(); err != nil {
+			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+			os.Exit(1)
+		}
+	case "train":
+		os.Exit(trainCmd(os.Args[2:]))
+	default:
+		fmt.Fprintln(os.Stderr, "usage: lmkit <quickstart|train> ...")
+		os.Exit(2)
 	}
 }
 
