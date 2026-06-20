@@ -47,7 +47,7 @@ func TestStepDescends(t *testing.T) {
 
 	var startLoss, endLoss float64
 	for i := 0; i < steps; i++ {
-		loss := s.Step(batch)
+		loss, _ := s.Step(batch)
 		if i == 0 {
 			startLoss = loss
 		}

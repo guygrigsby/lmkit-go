@@ -5,8 +5,15 @@ import g "github.com/gomlx/gomlx/core/graph"
 // clipByGlobalNorm scales grads so their global L2 norm <= clip (no-op if already
 // under). Mirrors torch.nn.utils.clip_grad_norm_. GoMLX has no built-in for this.
 func clipByGlobalNorm(grads []*g.Node, clip float64) []*g.Node {
+	clipped, _ := clipByGlobalNormWithNorm(grads, clip)
+	return clipped
+}
+
+// clipByGlobalNormWithNorm is like clipByGlobalNorm but also returns the pre-clip
+// global L2 norm node (for surfacing as a metric).
+func clipByGlobalNormWithNorm(grads []*g.Node, clip float64) (clipped []*g.Node, normNode *g.Node) {
 	if len(grads) == 0 {
-		return grads
+		return grads, nil
 	}
 	gr := grads[0].Graph()
 	total := g.ReduceAllSum(g.Mul(grads[0], grads[0]))
@@ -22,5 +29,5 @@ func clipByGlobalNorm(grads []*g.Node, clip float64) []*g.Node {
 	for i, gd := range grads {
 		out[i] = g.Mul(gd, scaleNode)
 	}
-	return out
+	return out, norm
 }

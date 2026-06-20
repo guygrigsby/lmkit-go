@@ -59,7 +59,9 @@ func accumulatorVar(scope *model.Scope, v *model.Variable) *model.Variable {
 type Stepper struct {
 	accOnly   *model.Exec
 	accApply  *model.Exec
+	store     *model.Store
 	gradAccum int
+	lrVar     *model.Variable // cached after first Step; nil until then
 }
 
 // NewStepper builds the accumulate/apply Execs and returns a Stepper.
@@ -82,68 +84,93 @@ func NewStepper(
 		panic("optimizer does not implement OptimizeWithGradients; use Adam or SGD")
 	}
 
-	// buildAccGraph is the shared graph-building core: computes loss, grads, and
-	// adds each grad into its accumulator variable. Returns accumulated grads and loss.
-	// If applyGradients is true it also: averages, clips, applies, and zeros accumulators.
-	buildGraph := func(applyGradients bool) func(*model.Scope, *g.Node, *g.Node) *g.Node {
-		return func(scope *model.Scope, x, y *g.Node) *g.Node {
-			gr := x.Graph()
-			lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions)
-
-			// Compute per-variable gradients in trainable-variable order.
-			grads := scope.BuildTrainableVariablesGradientsGraph(lossNode)
-
-			// Accumulate: for each trainable variable (in the same order as grads),
-			// update its accumulator. This mirrors accgradients.go lines 111-125.
-			varIdx := 0
-			for v := range scope.IterVariables() {
-				if !v.Trainable || !v.InUseByGraph(gr) {
-					continue
-				}
-				acc := accumulatorVar(scope, v)
-				// accumulated = acc_prev + grad; store both back as in accgradients.go:
-				// grads[varIdx] carries the new accumulated value for the apply step.
-				grads[varIdx] = g.Add(acc.NodeValue(gr), grads[varIdx])
-				acc.SetNodeValue(grads[varIdx])
-				varIdx++
+	// accOnlyFn: accumulate gradients, return loss only (no apply).
+	accOnlyFn := func(scope *model.Scope, x, y *g.Node) *g.Node {
+		gr := x.Graph()
+		lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions)
+		grads := scope.BuildTrainableVariablesGradientsGraph(lossNode)
+		varIdx := 0
+		for v := range scope.IterVariables() {
+			if !v.Trainable || !v.InUseByGraph(gr) {
+				continue
 			}
-
-			if !applyGradients {
-				return lossNode
-			}
-
-			// Mean over GradAccum micro-batches.
-			ratio := 1.0 / float64(gradAccum)
-			for ii := range grads {
-				grads[ii] = g.MulScalar(grads[ii], ratio)
-			}
-
-			// Global-norm clip then apply with AdamW.
-			clipped := clipByGlobalNorm(grads, gradClip)
-			owg.UpdateGraphWithGradients(scope, clipped, dtypes.Float32)
-
-			// Zero all accumulators.
-			for v := range scope.IterVariables() {
-				if !v.Trainable || !v.InUseByGraph(gr) {
-					continue
-				}
-				acc := accumulatorVar(scope, v)
-				acc.SetNodeValue(g.Zeros(gr, acc.Shape()))
-			}
-
-			return lossNode
+			acc := accumulatorVar(scope, v)
+			grads[varIdx] = g.Add(acc.NodeValue(gr), grads[varIdx])
+			acc.SetNodeValue(grads[varIdx])
+			varIdx++
 		}
+		return lossNode
+	}
+
+	// accApplyFn: accumulate + apply; returns (loss, gradNorm) for the metric.
+	accApplyFn := func(scope *model.Scope, x, y *g.Node) (*g.Node, *g.Node) {
+		gr := x.Graph()
+		lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions)
+		grads := scope.BuildTrainableVariablesGradientsGraph(lossNode)
+		varIdx := 0
+		for v := range scope.IterVariables() {
+			if !v.Trainable || !v.InUseByGraph(gr) {
+				continue
+			}
+			acc := accumulatorVar(scope, v)
+			grads[varIdx] = g.Add(acc.NodeValue(gr), grads[varIdx])
+			acc.SetNodeValue(grads[varIdx])
+			varIdx++
+		}
+
+		// Mean over GradAccum micro-batches.
+		ratio := 1.0 / float64(gradAccum)
+		for ii := range grads {
+			grads[ii] = g.MulScalar(grads[ii], ratio)
+		}
+
+		// Global-norm clip, capturing the pre-clip norm for the metric.
+		clipped, normNode := clipByGlobalNormWithNorm(grads, gradClip)
+		owg.UpdateGraphWithGradients(scope, clipped, dtypes.Float32)
+
+		// Zero all accumulators.
+		for v := range scope.IterVariables() {
+			if !v.Trainable || !v.InUseByGraph(gr) {
+				continue
+			}
+			acc := accumulatorVar(scope, v)
+			acc.SetNodeValue(g.Zeros(gr, acc.Shape()))
+		}
+
+		return lossNode, normNode
 	}
 
 	be := bk.Compute() // sole runtime reference; handed straight to model.NewExec
-	accOnly := model.MustNewExec(be, store, buildGraph(false))
-	accApply := model.MustNewExec(be, store, buildGraph(true))
+	accOnly := model.MustNewExec(be, store, accOnlyFn)
+	accApply := model.MustNewExec(be, store, accApplyFn)
 
 	return &Stepper{
 		accOnly:   accOnly,
 		accApply:  accApply,
+		store:     store,
 		gradAccum: gradAccum,
 	}
+}
+
+// SetLR updates the learning-rate variable for the next optimizer step. It locates
+// the variable lazily (the apply graph builds on first Step; the lr var doesn't exist
+// until then) and caches the handle. Safe to call from step 1 onward; step 0 uses
+// the initial lr baked into the Adam config. Returns an error only if the lr var
+// cannot be found after the first step has run.
+func (s *Stepper) SetLR(lr float64) error {
+	if s.lrVar == nil {
+		for v := range s.store.IterVariables() {
+			if v.Name() == optimizer.ParamLearningRate {
+				s.lrVar = v
+				break
+			}
+		}
+		if s.lrVar == nil {
+			// Graph hasn't been built yet (before first step); no-op.
+			return nil
+		}
+	}
+	return s.lrVar.SetValue(tensors.FromScalar(float32(lr)))
 }
 
 // Step runs one optimizer step: it pulls GradAccum micro-batches from next, accumulating
@@ -151,13 +178,18 @@ func NewStepper(
 // to next must return a distinct micro-batch — x is [B,T] int32 token ids, y is [B,T,1]
 // int32 next-token ids. Returning the same batch every call is valid (e.g. to overfit a
 // fixed batch) but then accumulation averages identical gradients; a real effective-batch
-// benefit requires next to yield different data each call. Returns the apply micro-batch loss.
-func (s *Stepper) Step(next func() (x, y *tensors.Tensor)) float64 {
+// benefit requires next to yield different data each call.
+// Returns the apply micro-batch loss and the pre-clip global gradient norm.
+func (s *Stepper) Step(next func() (x, y *tensors.Tensor)) (loss, gradNorm float64) {
 	for i := 0; i < s.gradAccum-1; i++ {
 		x, y := next()
 		s.accOnly.MustCall(x, y)
 	}
 	x, y := next()
 	out := s.accApply.MustCall(x, y)
-	return shapes.ConvertTo[float64](out[0].Value())
+	loss = shapes.ConvertTo[float64](out[0].Value())
+	if len(out) > 1 && out[1] != nil {
+		gradNorm = shapes.ConvertTo[float64](out[1].Value())
+	}
+	return loss, gradNorm
 }
