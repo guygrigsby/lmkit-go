@@ -101,6 +101,12 @@ func (l *Loader) makeBatch() Batch {
 // Next returns the next prefetched batch. Must not be called after Close.
 func (l *Loader) Next() Batch { return <-l.ch }
 
+// BlockSize returns the sequence length of each sample.
+func (l *Loader) BlockSize() int { return l.cfg.BlockSize }
+
+// BatchSize returns the number of rows per batch.
+func (l *Loader) BatchSize() int { return l.cfg.BatchSize }
+
 // Close stops prefetching and unmaps shards. It waits for the fill goroutine to
 // exit before unmapping, so no batch is built from an unmapped shard.
 // Safe to call more than once; subsequent calls are no-ops and return nil.
