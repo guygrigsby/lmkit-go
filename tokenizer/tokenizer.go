@@ -7,7 +7,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/dlclark/regexp2"
 )
+
+// gpt2Pattern is the byte-level pre-tokenization regex HF ByteLevel uses (needs
+// lookahead, so RE2/stdlib regexp can't run it — hence regexp2).
+var gpt2Pattern = regexp2.MustCompile(
+	`'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`,
+	regexp2.None)
 
 type pair struct{ a, b string }
 
@@ -96,6 +104,37 @@ func parseMerges(raw json.RawMessage) (map[pair]int, error) {
 }
 
 func (t *Tokenizer) Vocab() map[string]int { return t.vocab }
+
+// Encode tokenizes text to ids via byte-level BPE: optional prefix space, GPT-2
+// regex pre-tokenization, byte->unicode mapping, ranked merges, vocab lookup.
+func (t *Tokenizer) Encode(text string) []int {
+	if t.addPrefix && (len(text) == 0 || text[0] != ' ') {
+		text = " " + text
+	}
+	var ids []int
+	for _, piece := range splitGPT2(text) {
+		symbols := make([]string, 0, len(piece))
+		for _, b := range []byte(piece) {
+			symbols = append(symbols, string(t.byteToRune[b]))
+		}
+		for _, tok := range t.bpe(symbols) {
+			if id, ok := t.vocab[tok]; ok {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func splitGPT2(text string) []string {
+	var out []string
+	m, _ := gpt2Pattern.FindStringMatch(text)
+	for m != nil {
+		out = append(out, m.String())
+		m, _ = gpt2Pattern.FindNextMatch(m)
+	}
+	return out
+}
 
 // Decode maps ids -> token strings -> the byte-level unicode string -> bytes.
 func (t *Tokenizer) Decode(ids []int) string {
