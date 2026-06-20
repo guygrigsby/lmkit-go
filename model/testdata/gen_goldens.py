@@ -104,9 +104,61 @@ def gen_attention():
            "rope_base": base, "seq_len": T},
           {"x": x}, {"Wq": Wq, "Wk": Wk, "Wv": Wv, "Wo": Wo}, y)
 
+import torch.nn.functional as F
+
+def _rmsnorm(x, scale, eps):
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * scale
+
+def _rope(x, hd, base):                       # x [B,T,nheads,hd]
+    T = x.shape[1]
+    inv = 1.0 / (base ** (torch.arange(0, hd, 2).float() / hd))
+    emb = torch.cat([torch.arange(T)[:, None].float() * inv[None, :]] * 2, dim=-1)
+    cos = emb.cos()[None, :, None, :]; sin = emb.sin()[None, :, None, :]
+    a, b = x[..., : hd // 2], x[..., hd // 2 :]
+    return x * cos + torch.cat([-b, a], dim=-1) * sin
+
+def _attention(x, w, nH, nKV, hd, base):
+    B, T, _ = x.shape
+    q = (x @ w["Wq"]).view(B, T, nH, hd); k = (x @ w["Wk"]).view(B, T, nKV, hd); v = (x @ w["Wv"]).view(B, T, nKV, hd)
+    q = _rope(q, hd, base); k = _rope(k, hd, base)
+    rep = nH // nKV
+    k = k.repeat_interleave(rep, dim=2); v = v.repeat_interleave(rep, dim=2)
+    q = q.transpose(1, 2); k = k.transpose(1, 2); v = v.transpose(1, 2)
+    s = (q @ k.transpose(-1, -2)) / math.sqrt(hd)
+    s = s + torch.triu(torch.full((T, T), float("-inf")), diagonal=1)
+    o = (s.softmax(-1) @ v).transpose(1, 2).reshape(B, T, nH * hd)
+    return o @ w["Wo"]
+
+def _swiglu(x, w):
+    return (F.silu(x @ w["Wg"]) * (x @ w["Wu"])) @ w["Wd"]
+
+def _decoder_layer(h, w, cfg):
+    h = h + _attention(_rmsnorm(h, w["attn_norm"], cfg["eps"]), w, cfg["nH"], cfg["nKV"], cfg["hd"], cfg["base"])
+    h = h + _swiglu(_rmsnorm(h, w["ffn_norm"], cfg["eps"]), w)
+    return h
+
+def _layer_weights(H, nH, nKV, hd, ffn):
+    return {"attn_norm": torch.randn(H), "Wq": torch.randn(H, nH*hd), "Wk": torch.randn(H, nKV*hd),
+            "Wv": torch.randn(H, nKV*hd), "Wo": torch.randn(nH*hd, H), "ffn_norm": torch.randn(H),
+            "Wg": torch.randn(H, ffn), "Wu": torch.randn(H, ffn), "Wd": torch.randn(ffn, H)}
+
+def gen_decoder_layer():
+    torch.manual_seed(42)
+    B, T, H, nH, nKV, hd, ffn = 2, 4, 8, 4, 2, 2, 16
+    cfg = {"nH": nH, "nKV": nKV, "hd": hd, "base": 10000.0, "eps": 1e-5}
+    h = torch.randn(B, T, H)
+    w = _layer_weights(H, nH, nKV, hd, ffn)
+    y = _decoder_layer(h, w, cfg)
+    weights = {"attn_norm": w["attn_norm"], "Wq": w["Wq"], "Wk": w["Wk"], "Wv": w["Wv"],
+               "Wo": w["Wo"], "ffn_norm": w["ffn_norm"], "Wgate": w["Wg"], "Wup": w["Wu"], "Wdown": w["Wd"]}
+    write("decoder", {"hidden": H, "n_heads": nH, "n_kv_heads": nKV, "head_dim": hd,
+                      "ffn_hidden": ffn, "rope_base": 10000.0, "rms_eps": 1e-5, "seq_len": T},
+          {"h": h}, weights, y)
+
 if __name__ == "__main__":
     gen_rmsnorm()
     gen_rope()
     gen_swiglu()
     gen_embedding()
     gen_attention()
+    gen_decoder_layer()
