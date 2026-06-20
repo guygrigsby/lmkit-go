@@ -1,10 +1,11 @@
 go 1.26
 
 use (
-	./backend
 	./app
+	./backend
 	./data
+	./examples/lm-100m-en
 	./model
-	./train
 	./tokenizer
+	./train
 )
