@@ -56,8 +56,12 @@ be injected. Mechanics mirrored verbatim:
   `eval` (`val_loss/val_perplexity/best_val/train_loss/lr/improved`), `train`
   (`train_loss/lr/grad_norm/tok_per_sec/step_time_ms/tokens_seen/tflops/peak_vram_gb`),
   `nan`, `sigterm`, `done`. Existing Grafana/ops CLI work unchanged. (No Aim.)
-- **Robustness**: non-finite loss → save `latest` + `nan` + exit 2; SIGTERM/SIGINT →
-  clean save + `sigterm` + exit 0. Durable/resumable (the WSD trunk runs indefinitely).
+- **Robustness**: non-finite loss → save the diverged state to a separate `nan/` dir
+  (NOT `latest/`, so the last good checkpoint stays resumable) + `nan` event + exit 2;
+  SIGTERM/SIGINT → clean save + `sigterm` + exit 0. Durable/resumable (the WSD trunk
+  runs indefinitely). (Revised from the original "save `latest`": overwriting `latest/`
+  with NaN weights would poison the resume path; the supervisor leaves exit 2 for manual
+  inspection.)
 - **tflops** = `6*nParams*tok_per_sec/1e12`; **peak_vram_gb** via NVML
   (`github.com/NVIDIA/go-nvml`, dlopen; 0 where NVML absent).
 

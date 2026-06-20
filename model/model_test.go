@@ -51,3 +51,17 @@ func TestForwardParity(t *testing.T) {
 	// tolerance for the computation depth, not for a lucky weight set.
 	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 5e-4)
 }
+
+// TestForwardRejectsLayerCountMismatch gates the depth guard: a weight set whose layer
+// count disagrees with cfg.NLayers must panic rather than silently run the wrong depth.
+// The guard runs before any graph op, so the nil tensor/positions args are never touched.
+func TestForwardRejectsLayerCountMismatch(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("Forward did not panic on layer-count mismatch")
+		}
+	}()
+	cfg := model.Config{NLayers: 12}
+	w := model.Weights{Layers: make([]model.LayerWeights, 3)} // 3 != 12
+	model.Forward(cfg, w, nil, nil)
+}
