@@ -153,6 +153,33 @@ def gen_decoder_layer():
                       "ffn_hidden": ffn, "rope_base": 10000.0, "rms_eps": 1e-5, "seq_len": T},
           {"h": h}, weights, y)
 
+def gen_model():
+    torch.manual_seed(3)  # fixed isolation seed (chosen for reproducibility, NOT to fit the tolerance)
+    B, T, V, H, nL, nH, nKV, hd, ffn = 2, 5, 16, 8, 2, 4, 2, 2, 16
+    cfg = {"nH": nH, "nKV": nKV, "hd": hd, "base": 10000.0, "eps": 1e-5}
+    ids = torch.randint(0, V, (B, T), dtype=torch.int64)
+    embed = torch.randn(V, H)
+    layers = [_layer_weights(H, nH, nKV, hd, ffn) for _ in range(nL)]
+    final_norm = torch.randn(H)
+    h = embed[ids]
+    for w in layers:
+        h = _decoder_layer(h, w, cfg)
+    h = _rmsnorm(h, final_norm, cfg["eps"])
+    logits = h @ embed.t()
+    weights = {"embed": embed, "final_norm": final_norm}
+    for i, w in enumerate(layers):
+        for src, dst in [("attn_norm", "attn_norm"), ("Wq", "Wq"), ("Wk", "Wk"), ("Wv", "Wv"),
+                         ("Wo", "Wo"), ("ffn_norm", "ffn_norm"), ("Wg", "Wgate"), ("Wu", "Wup"), ("Wd", "Wdown")]:
+            weights[f"layer{i}_{dst}"] = w[src]
+    obj = {"config": {"vocab": V, "hidden": H, "n_layers": nL, "n_heads": nH, "n_kv_heads": nKV,
+                      "head_dim": hd, "ffn_hidden": ffn, "rope_base": 10000.0, "rms_eps": 1e-5, "seq_len": T},
+           "inputs": {"ids": {"shape": list(ids.shape), "dtype": "i32", "data": ids.flatten().tolist()}},
+           "weights": {k: t2j(v) for k, v in weights.items()},
+           "expected": t2j(logits)}
+    with open("model.json", "w") as fp:
+        json.dump(obj, fp)
+    print("wrote model.json")
+
 if __name__ == "__main__":
     gen_rmsnorm()
     gen_rope()
@@ -160,3 +187,4 @@ if __name__ == "__main__":
     gen_embedding()
     gen_attention()
     gen_decoder_layer()
+    gen_model()
