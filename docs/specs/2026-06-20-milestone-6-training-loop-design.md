@@ -9,7 +9,7 @@ Mirrors the Python `lmkit.pretrain` + `lmkit.training` mechanics exactly.
 A **generic pretrain loop** (any model/config) that reproduces the lm-100m-en
 baseline's training mechanics, **plus** an `examples/lm-100m-en` package holding all
 lm-100m-specific wiring, runnable as **gated long integration tests** that drive the
-short bf16 smoke and launch the full replica run on `trig` toward val loss **1.7337**.
+short bf16 smoke and launch the full replica run on the CUDA GPU host toward val loss **1.7337**.
 
 Clean split — exactly like the Python side (`lmkit.pretrain` is generic;
 `training/lm-100m-en/` is the consumer):
@@ -18,7 +18,7 @@ Clean split — exactly like the Python side (`lmkit.pretrain` is generic;
   integration tests. The only place lm-100m values live.
 
 "Done" = the loop **validated** (fast CPU tests in `make check` + the example's short
-`trig` bf16 integration test) and the full lm-100m-en run **launched durably**; the
+CUDA GPU host bf16 integration test) and the full lm-100m-en run **launched durably**; the
 multi-day val curve lands later.
 
 ## Part A — generic `train` loop (the library)
@@ -93,7 +93,7 @@ things:
   invocation).
 - **Long integration tests** (build tag `//go:build integration`, **excluded from
   `make check`**, run on demand with `go test -tags integration ./examples/lm-100m-en/`):
-  - **short bf16 smoke (`trig`/CUDA):** a few hundred steps of the real config —
+  - **short bf16 smoke (CUDA GPU host):** a few hundred steps of the real config —
     loss descending, bf16 path works, `peak_vram_gb` read, checkpoint→resume on CUDA.
   - **(optional) tiny CPU end-to-end:** a scaled-down lm-100m config on SimpleGo
     confirming the full wiring (model+data+loop+config) runs and checkpoints.
@@ -122,7 +122,7 @@ the model vars) + optimizer application + GoMLX checkpoint.
   schema correct, eval runs, forced-NaN→exit2 + a SIGTERM save path). All fp32 on
   SimpleGo. No lm-100m specifics.
 - **Long integration (gated, not in `make check`):** the `examples/lm-100m-en`
-  build-tagged tests above — the short `trig` bf16 smoke + (optional) tiny CPU
+  build-tagged tests above — the short CUDA GPU host bf16 smoke + (optional) tiny CPU
   end-to-end + the launch.
 
 ## Done criteria
@@ -134,7 +134,7 @@ the model vars) + optimizer application + GoMLX checkpoint.
       RMSNorm/softmax/loss; model parity tests still green.
 - [ ] `cmd/lmkit train --config` builds model + loaders + runs (generic).
 - [ ] `examples/lm-100m-en`: config JSON + build-tagged long integration tests; the
-      short `trig` bf16 smoke green; full run launched durably.
+      short CUDA GPU host bf16 smoke green; full run launched durably.
 - [ ] Fast `train` tests green in `make check`; integration tests excluded from it;
       boundary clean.
 
@@ -146,5 +146,5 @@ the model vars) + optimizer application + GoMLX checkpoint.
 - Checkpoint layout (GoMLX checkpoint dir vs single-file `latest`) matching the
   baseline's `latest`/`best`/`step_NNNNNN` closely enough for the ops CLI.
 - `examples/lm-100m-en` as its own module vs under `app`; how the integration test
-  reaches `trig` (cross-compile+rsync, per the established method) vs running there.
+  reaches the GPU host (cross-compile+rsync, per the established method) vs running there.
 </content>

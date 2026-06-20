@@ -50,8 +50,8 @@ These gate the replica train. lm-100m-en config values in parens.
   M4's `Overfit` is the seed; this is the production loop.
 - ⬜ **TrainConfig + config loading** — a Go `TrainConfig` mirroring the dataclass
   (lr/schedule/batch/intervals/optimizer/seed/dtype); load from file.
-- ⬜ **Run on `trig`** — the actual long run toward the 1.7337 val curve (single
-  3070 Ti CUDA, bf16, ~days). Durable/resumable per the WSD config.
+- ⬜ **Run on the GPU host** — the actual long run toward the 1.7337 val curve (single
+  CUDA GPU ~8GB, bf16, ~days). Durable/resumable per the WSD config.
 
 ## B. Tokenizer (lmkit/tokenizer.py, lmkit/shard.py)
 - ⬜ **Load + encode/decode** byte-level BPE (next milestone).
@@ -89,7 +89,7 @@ These gate the replica train. lm-100m-en config values in parens.
 ## F. Backend / kernels / hardware (mostly ADR-0004, intentional)
 - 🧊 **FlashAttention** as an XLA op-graph — explicit `softmax(QKᵀ/√d)V` today;
   O(seq²) memory. Fine at this scale; a perf milestone.
-- 🧊 **ROCm** (R9700) training path — PJRT-ROCm validation pending.
+- 🧊 **ROCm** (an AMD/ROCm GPU) training path — PJRT-ROCm validation pending.
 - 🧊 **Metal** (Apple GPU) training — revive the PJRT-Metal bridge (jax-metal is
   abandoned). Workstream, not on the repro critical path.
 - ⬜ **peak-VRAM** query — `go-nvml` poll (CUDA-only), for metrics.

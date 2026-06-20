@@ -95,7 +95,7 @@ vocab size (well past 2^24) round-trips exactly.
 
 Both fp32 on SimpleGo (`-tags noxla`, `GOMLX_BACKEND=go`). Tolerance documented per
 test; expect ~5e-5 (deepest accumulation chain so far — embeddings through N
-attention+FFN layers, final norm, tied projection). Goldens generated on `trig`
+attention+FFN layers, final norm, tied projection). Goldens generated on a CUDA GPU host
 (PyTorch, per the M2 procedure), committed so CI needs no Python.
 
 ## Structure

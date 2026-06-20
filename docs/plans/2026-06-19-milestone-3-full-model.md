@@ -6,7 +6,7 @@
 
 **Architecture:** A pure forward function over explicit weight Nodes (no GoMLX variables) in the existing `model` module: embeddings → N pre-norm decoder layers with residuals → final RMSNorm → tied logits. Parity tests build all weights + token ids as graph constants from a committed PyTorch golden and compare on SimpleGo. The `paritytest` harness gains an exact integer-tensor path for token ids.
 
-**Tech Stack:** Go 1.26, GoMLX `core/graph` (pinned `516689cbe913`); reuses the M2 blocks; PyTorch (on `trig`) for goldens; SimpleGo (`-tags noxla`, `GOMLX_BACKEND=go`).
+**Tech Stack:** Go 1.26, GoMLX `core/graph` (pinned `516689cbe913`); reuses the M2 blocks; PyTorch (on the GPU host) for goldens; SimpleGo (`-tags noxla`, `GOMLX_BACKEND=go`).
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - **Pure forward, explicit weights:** no `model.Scope`/`Store`/variables; the model threads weight Nodes through the M2 blocks (unchanged).
 - **Determinism:** explicit weights, seeded generator, no RNG in the model.
 - **Tolerance:** pick per test for the computation depth in fp32 (decoder layer 2e-4, full forward 5e-4), set *before* running — exceed the per-seed spread so a correct impl passes for any seed. Do not loosen to mask a wiring bug, and do not seed-shop the generator to fit a tighter number (that hides the real tolerance floor).
-- **PyTorch is on `trig`.** Generate goldens via the procedure below, copy JSON back, no repo on the box.
+- **PyTorch is on the GPU host.** Generate goldens via the procedure below, copy JSON back, no repo on the box.
 - **Commits:** terse, verb-first, no dashes, no Claude/Anthropic attribution.
 
 ## Existing M2 block signatures (reuse verbatim — all in package `model`, import `g "github.com/gomlx/gomlx/core/graph"`)
@@ -29,13 +29,15 @@ func TiedLogits(h, table *g.Node) *g.Node                    // h [B,T,H], table
 ```
 Residual add: `g.Add(a, b)`. Constant from a tensor: `g.Const(gr, t)` where `gr` is the `*g.Graph` the exec fn receives and `t` is a `*tensors.Tensor`.
 
-## Golden generation procedure (PyTorch on `trig`)
+## Golden generation procedure (PyTorch on the GPU host)
+
+`$GPU_HOST` = your CUDA host.
 
 ```bash
-scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
-ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
-scp trig:/tmp/<block>.json model/testdata/
-ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+scp model/testdata/gen_goldens.py "$GPU_HOST":/tmp/gen_goldens.py
+ssh "$GPU_HOST" 'cd /tmp && python gen_goldens.py'
+scp "$GPU_HOST":/tmp/<block>.json model/testdata/
+ssh "$GPU_HOST" 'rm -f /tmp/gen_goldens.py /tmp/*.json'
 ```
 Deterministic (seeded). Copy back only the fixture(s) the current task adds.
 
@@ -205,7 +207,7 @@ One pre-norm Llama decoder layer with residuals, parity-checked against a torch 
 
 **Files:**
 - Modify: `model/testdata/gen_goldens.py` (add shared torch helpers + `gen_decoder_layer`)
-- Create: `model/testdata/decoder.json` (generated on trig)
+- Create: `model/testdata/decoder.json` (generated on the GPU host)
 - Create: `model/decoder.go`
 - Create: `model/decoder_test.go`
 
@@ -267,12 +269,12 @@ def gen_decoder_layer():
                       "ffn_hidden": ffn, "rope_base": 10000.0, "rms_eps": 1e-5, "seq_len": T},
           {"h": h}, weights, y)
 ```
-Add `gen_decoder_layer()` to the `__main__` block. Regenerate on trig (procedure above), copying back `decoder.json`:
+Add `gen_decoder_layer()` to the `__main__` block. Regenerate on the GPU host (procedure above), copying back `decoder.json`:
 ```bash
-scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
-ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
-scp trig:/tmp/decoder.json model/testdata/
-ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+scp model/testdata/gen_goldens.py "$GPU_HOST":/tmp/gen_goldens.py
+ssh "$GPU_HOST" 'cd /tmp && python gen_goldens.py'
+scp "$GPU_HOST":/tmp/decoder.json model/testdata/
+ssh "$GPU_HOST" 'rm -f /tmp/gen_goldens.py /tmp/*.json'
 ```
 
 - [ ] **Step 2: Write the failing DecoderLayer parity test**
@@ -376,7 +378,7 @@ The whole forward pass: embeddings → N decoder layers → final norm → tied 
 
 **Files:**
 - Modify: `model/testdata/gen_goldens.py` (add `gen_model`)
-- Create: `model/testdata/model.json` (generated on trig)
+- Create: `model/testdata/model.json` (generated on the GPU host)
 - Create: `model/model.go`
 - Create: `model/model_test.go`
 
@@ -415,12 +417,12 @@ def gen_model():
         json.dump(obj, fp)
     print("wrote model.json")
 ```
-Add `gen_model()` to `__main__`. (Token ids are written with `"dtype": "i32"` and raw integer data — the integer fixture path from Task 1.) Regenerate on trig, copying back `model.json`:
+Add `gen_model()` to `__main__`. (Token ids are written with `"dtype": "i32"` and raw integer data — the integer fixture path from Task 1.) Regenerate on the GPU host, copying back `model.json`:
 ```bash
-scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
-ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
-scp trig:/tmp/model.json model/testdata/
-ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+scp model/testdata/gen_goldens.py "$GPU_HOST":/tmp/gen_goldens.py
+ssh "$GPU_HOST" 'cd /tmp && python gen_goldens.py'
+scp "$GPU_HOST":/tmp/model.json model/testdata/
+ssh "$GPU_HOST" 'rm -f /tmp/gen_goldens.py /tmp/*.json'
 ```
 
 - [ ] **Step 2: Write the failing Forward parity test**

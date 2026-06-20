@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prove that GoMLX/XLA, driven only through the lmkit-go `backend` boundary, can do a correct matmul, a correct gradient, and an AdamW optimizer step — on CPU here (SimpleGo) and on CUDA on `trig`.
+**Goal:** Prove that GoMLX/XLA, driven only through the lmkit-go `backend` boundary, can do a correct matmul, a correct gradient, and an AdamW optimizer step — on CPU locally (SimpleGo) and on CUDA on a CUDA GPU host.
 
 **Architecture:** A per-package-module monorepo. The `backend` module defines lmkit-go's own tensor/device types and a tiny `Backend` interface; the only package allowed to import GoMLX is the `backend/gomlx` adapter. An `app` module ships a `lmkit quickstart` that runs the three proofs. Contract tests pin the numerics so a GoMLX `main` bump breaks here, in one place.
 
-**Tech Stack:** Go 1.26, GoMLX `main` (`github.com/gomlx/gomlx`) on the `github.com/gomlx/compute` + `github.com/gomlx/go-xla` modules. Pure-Go `SimpleGo` backend for local CPU; XLA CUDA on `trig`.
+**Tech Stack:** Go 1.26, GoMLX `main` (`github.com/gomlx/gomlx`) on the `github.com/gomlx/compute` + `github.com/gomlx/go-xla` modules. Pure-Go `SimpleGo` backend for local CPU; XLA CUDA on a CUDA GPU host.
 
 ## Global Constraints
 
@@ -17,7 +17,7 @@
 - **Public API is additive (ADR-0008):** the `Backend` interface stays minimal; under-expose now, grow later. Method names are specific to what they prove.
 - **Test rigor (ADR-0007):** contract tests pin numerical output; the green gate is the merge bar for every change including dep bumps.
 - **Commits:** terse, verb-first, no dashes, no Claude/Anthropic attribution (no `Co-Authored-By: Claude`, no "Generated with").
-- **Platforms:** Mac local dev runs SimpleGo with `-tags noxla` + `GOMLX_BACKEND=go` (no XLA/PJRT libraries needed). XLA-CPU/CUDA build *without* `noxla` and need the XLA libs/PJRT plugin. CUDA runs only on `trig`; wrap GPU jobs in `gputex`; never edit source on the box — it pulls.
+- **Platforms:** Local dev runs SimpleGo with `-tags noxla` + `GOMLX_BACKEND=go` (no XLA/PJRT libraries needed). XLA-CPU/CUDA build *without* `noxla` and need the XLA libs/PJRT plugin. CUDA runs on a CUDA GPU host (`$GPU_HOST`); check the GPU is idle with `nvidia-smi` first; never edit source on the box — it pulls.
 
 ## Verified GoMLX `main` API reference (read against commit ~`516689c`, 2026-06-19)
 
@@ -675,17 +675,17 @@ Makefile build and test every module on SimpleGo."
 
 ---
 
-### Task 5: Validate on CUDA (`trig`) — DONE 2026-06-19
+### Task 5: Validate on CUDA (GPU host) — DONE 2026-06-19
 
 Confirms the same quickstart runs on the NVIDIA path. No new code — environment
 validation. A green SimpleGo run is not a green CUDA run; both are required.
 
-**Deploy method (actual):** cross-compile a binary on the Mac and rsync it to
-`trig:/tmp`; run it there; clean up. No work repo on the box (artifact-only
-deploy — a `/tmp` binary is fine, a source checkout is not). `trig` has no
-`gputex`; the GPU was confirmed idle via `nvidia-smi` before the (~1s) run.
+**Deploy method (actual):** cross-compile a binary locally and rsync it to
+`"$GPU_HOST":/tmp`; run it there; clean up. No work repo on the box (artifact-only
+deploy — a `/tmp` binary is fine, a source checkout is not). `$GPU_HOST` = your CUDA host.
+The GPU was confirmed idle via `nvidia-smi` before the (~1s) run.
 
-- [x] **Step 1: Cross-compile for linux/amd64 on the Mac**
+- [x] **Step 1: Cross-compile for linux/amd64 locally**
 
 SimpleGo (pure Go, no cgo) — proves portability:
 ```bash
@@ -697,30 +697,30 @@ CC="zig cc -target x86_64-linux-gnu" CXX="zig c++ -target x86_64-linux-gnu" \
 CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /tmp/lmkit-cuda-amd64 ./app/cmd/lmkit
 ```
 
-- [x] **Step 2: Run SimpleGo on `trig`**
+- [x] **Step 2: Run SimpleGo on the GPU host**
 
 ```bash
-rsync -az /tmp/lmkit-linux-amd64 trig:/tmp/
-ssh trig 'GOMLX_BACKEND=go /tmp/lmkit-linux-amd64 quickstart'
+rsync -az /tmp/lmkit-linux-amd64 "$GPU_HOST":/tmp/
+ssh "$GPU_HOST" 'GOMLX_BACKEND=go /tmp/lmkit-linux-amd64 quickstart'
 ```
 Result: green (`device: "Go Backend"`, three OK lines).
 
-- [x] **Step 3: Run CUDA on `trig`**
+- [x] **Step 3: Run CUDA on the GPU host**
 
 ```bash
-rsync -az /tmp/lmkit-cuda-amd64 trig:/tmp/
-ssh trig 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'  # confirm idle
-ssh trig 'GOMLX_BACKEND=xla:cuda /tmp/lmkit-cuda-amd64 quickstart'
+rsync -az /tmp/lmkit-cuda-amd64 "$GPU_HOST":/tmp/
+ssh "$GPU_HOST" 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'  # confirm idle
+ssh "$GPU_HOST" 'GOMLX_BACKEND=xla:cuda /tmp/lmkit-cuda-amd64 quickstart'
 ```
 Note the selector is **`xla:cuda`**, not `cuda` (the backend is `xla`; CUDA is its
 PJRT plugin). go-xla auto-installs the `cuda` PJRT plugin to `~/.local/lib` on
-first run. Result: green on the RTX 3070 Ti (device `xla:cuda … v0.112 [1
+first run. Result: green on the NVIDIA GPU (device `xla:cuda … v0.112 [1
 device(s)]`, three OK lines, `loss=1.42e-12`).
 
 - [x] **Step 4: Clean up and record**
 
 ```bash
-ssh trig 'rm -f /tmp/lmkit-cuda-amd64 /tmp/lmkit-linux-amd64'
+ssh "$GPU_HOST" 'rm -f /tmp/lmkit-cuda-amd64 /tmp/lmkit-linux-amd64'
 rm -f /tmp/lmkit-cuda-amd64 /tmp/lmkit-linux-amd64
 ```
 Results recorded in the Milestone 1 spec's "Validation results" section.
@@ -738,7 +738,7 @@ Results recorded in the Milestone 1 spec's "Validation results" section.
 - boundary grep test wired into the gate → Task 4.
 - boundary contract tests (ADR-0007) → the three numerical tests are exactly these.
 - device selection SimpleGo/CPU/CUDA via one knob (`GOMLX_BACKEND`) → Tasks 1–5.
-- run on Mac (SimpleGo) and `trig` (CUDA) → Tasks 4 and 5.
+- run locally (SimpleGo) and on the CUDA GPU host → Tasks 4 and 5.
 - Done criteria → covered by Tasks 1–5.
 
 **Out of scope, correctly absent:** Llama blocks, training loop proper, tokenizer/data, Metal/ROCm, full bf16 validation. A bf16 smoke (spec open question) is deferred — note it as the first follow-up in Milestone 2 rather than expanding M1.

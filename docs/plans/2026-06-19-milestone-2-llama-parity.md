@@ -44,19 +44,19 @@ x.Shape().Dimensions  // []int ; x.Rank() int
 
 Exec (in `*_test.go` only): `exec := g.MustNewExec(be, func(a, b *g.Node) *g.Node {...}); out := exec.MustExec1(aT, bT)` where `be` comes from `gomlx.New().Compute()` and `aT,bT` are `*tensors.Tensor`.
 
-## Golden generation procedure (PyTorch lives on `trig`, not the Mac)
+## Golden generation procedure (PyTorch lives on the GPU host, not locally)
 
-The Mac has no PyTorch. `trig` has it in `~/venvs/cuda/bin/python` (torch 2.12.1;
-CPU tensors only, so the cuda vs rocm venv is irrelevant). The generator script is
-maintained in the repo on the Mac; goldens are generated on `trig` and the JSON
+The local dev machine has no PyTorch. The GPU host has a Python with PyTorch (e.g. a venv: `python`).
+CPU tensors only, so the cuda vs rocm venv is irrelevant. The generator script is
+maintained in the repo locally; goldens are generated on the GPU host and the JSON
 artifacts copied back (artifacts in `/tmp` are fine; no work repo on the box).
-Whenever a task says "regenerate goldens", run this from the repo root on the Mac:
+`$GPU_HOST` = your CUDA host. Whenever a task says "regenerate goldens", run this from the repo root locally:
 
 ```bash
-scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
-ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'   # writes /tmp/<block>.json
-scp trig:/tmp/<block>.json model/testdata/                     # copy back the block(s) this task added
-ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'               # clean up the box
+scp model/testdata/gen_goldens.py "$GPU_HOST":/tmp/gen_goldens.py
+ssh "$GPU_HOST" 'cd /tmp && python gen_goldens.py'   # writes /tmp/<block>.json
+scp "$GPU_HOST":/tmp/<block>.json model/testdata/    # copy back the block(s) this task added
+ssh "$GPU_HOST" 'rm -f /tmp/gen_goldens.py /tmp/*.json'  # clean up the box
 ```
 
 The script regenerates every block present in its `__main__` on each run; copy back
@@ -290,9 +290,9 @@ func AssertClose(t *testing.T, got []float32, want Tensor, tol float32) {
 #!/usr/bin/env python3
 """Generate JSON golden fixtures for lmkit-go model block parity tests.
 
-Runs on trig: `~/venvs/cuda/bin/python gen_goldens.py` (the Mac has no torch).
 Requires torch (CPU tensors only). Deterministic (seeded). Each block writes
 <block>.json with {config, inputs, weights, expected} as float32 row-major.
+Run on a host with PyTorch (e.g. a venv: python gen_goldens.py).
 """
 import json, math, torch
 
@@ -323,15 +323,15 @@ def gen_rmsnorm():
 if __name__ == "__main__":
     gen_rmsnorm()
 ```
-Run the golden-generation procedure (above) to produce `rmsnorm.json` on `trig` and
+Run the golden-generation procedure (above) to produce `rmsnorm.json` on the GPU host and
 copy it back:
 ```bash
-scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
-ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
-scp trig:/tmp/rmsnorm.json model/testdata/
-ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+scp model/testdata/gen_goldens.py "$GPU_HOST":/tmp/gen_goldens.py
+ssh "$GPU_HOST" 'cd /tmp && python gen_goldens.py'
+scp "$GPU_HOST":/tmp/rmsnorm.json model/testdata/
+ssh "$GPU_HOST" 'rm -f /tmp/gen_goldens.py /tmp/*.json'
 ```
-Expected: `trig` prints `wrote rmsnorm.json`; `model/testdata/rmsnorm.json` exists locally.
+Expected: the GPU host prints `wrote rmsnorm.json`; `model/testdata/rmsnorm.json` exists locally.
 
 - [ ] **Step 6: Write the failing RMSNorm parity test**
 
@@ -453,10 +453,10 @@ def gen_rope():
 Add `gen_rope()` to the `__main__` block. Regenerate via the golden-generation
 procedure (above), copying back `rope.json`:
 ```bash
-scp model/testdata/gen_goldens.py trig:/tmp/gen_goldens.py
-ssh trig 'cd /tmp && ~/venvs/cuda/bin/python gen_goldens.py'
-scp trig:/tmp/rope.json model/testdata/
-ssh trig 'rm -f /tmp/gen_goldens.py /tmp/*.json'
+scp model/testdata/gen_goldens.py "$GPU_HOST":/tmp/gen_goldens.py
+ssh "$GPU_HOST" 'cd /tmp && python gen_goldens.py'
+scp "$GPU_HOST":/tmp/rope.json model/testdata/
+ssh "$GPU_HOST" 'rm -f /tmp/gen_goldens.py /tmp/*.json'
 ```
 Expected: `model/testdata/rope.json` exists locally.
 
@@ -582,7 +582,7 @@ def gen_swiglu():
           {"x": x}, {"Wg": Wg, "Wu": Wu, "Wd": Wd}, y)
 ```
 Regenerate via the golden-generation procedure (above), copying back `swiglu.json`
-(`scp trig:/tmp/swiglu.json model/testdata/`).
+(`scp "$GPU_HOST":/tmp/swiglu.json model/testdata/`).
 
 - [ ] **Step 2: Write the failing test**
 
@@ -693,7 +693,7 @@ def gen_embedding():
     print("wrote embedding.json")
 ```
 Regenerate via the golden-generation procedure (above), copying back
-`embedding.json` (`scp trig:/tmp/embedding.json model/testdata/`). (`ids` are int32; `t2j` casts to float32 for JSON — the Go test converts back to int32 when building the index tensor; see Step 3.)
+`embedding.json` (`scp "$GPU_HOST":/tmp/embedding.json model/testdata/`). (`ids` are int32; `t2j` casts to float32 for JSON — the Go test converts back to int32 when building the index tensor; see Step 3.)
 
 - [ ] **Step 2: Write the failing test**
 
@@ -844,7 +844,7 @@ def gen_attention():
           {"x": x}, {"Wq": Wq, "Wk": Wk, "Wv": Wv, "Wo": Wo}, y)
 ```
 Regenerate via the golden-generation procedure (above), copying back
-`attention.json` (`scp trig:/tmp/attention.json model/testdata/`).
+`attention.json` (`scp "$GPU_HOST":/tmp/attention.json model/testdata/`).
 
 - [ ] **Step 2: Write the failing test**
 

@@ -4,8 +4,8 @@ Status: accepted (2026-06-19)
 
 ## Context
 
-Three GPU architectures are available: CUDA (3070 Ti, `trig`), ROCm (R9700), and
-Metal (this Mac). A natural but wrong assumption is that supporting all three means
+Three GPU architectures are available: CUDA (a CUDA GPU, e.g. ~8GB), ROCm (an AMD/ROCm GPU), and
+Metal (local dev machine). A natural but wrong assumption is that supporting all three means
 writing GPU kernels. It does not — and Python doesn't either.
 
 Vendor kernels already exist for all three: cuBLAS/cuDNN (NVIDIA),
@@ -23,7 +23,7 @@ XLA's StableHLO into vendor calls.
 | ROCm | rocBLAS/MIOpen | exists in OpenXLA, untested via GoMLX |
 | Metal | MPSGraph | jax-metal frozen Oct 2024, version-incompatible with current GoMLX StableHLO |
 
-The Mac trains today via Python MLX/MPS — a different path that calls MPSGraph
+The local dev machine trains today via Python MLX/MPS — a different path that calls MPSGraph
 directly, not through XLA/PJRT. The broken piece for GoMLX-on-Metal is the *bridge*,
 not the kernels.
 

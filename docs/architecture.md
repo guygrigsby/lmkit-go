@@ -24,7 +24,7 @@ flowchart TB
     ADP["backend/gomlx ✅<br/>the ONLY vendor importer<br/>runtime: construct · compile/exec · optimizer · checkpoint · device"]
   end
 
-  VENDOR["GoMLX · go-xla · PJRT ⚙️ inherited<br/>autodiff · op fusion · kernels · codegen<br/>CUDA (trig) · CPU/SimpleGo · ROCm/Metal (deferred)"]
+  VENDOR["GoMLX · go-xla · PJRT ⚙️ inherited<br/>autodiff · op fusion · kernels · codegen<br/>CUDA (GPU host) · CPU/SimpleGo · ROCm/Metal (deferred)"]
 
   CLI --> TRAIN
   CLI --> MODEL
@@ -81,4 +81,4 @@ Mechanics mirror `lmkit.pretrain` + `lmkit.training` exactly; the loop is
 hand-rolled (Go `for` + a compiled step graph) so eval/checkpoint/metrics/per-step
 LR interleave and the global-norm clip (which GoMLX lacks) can be injected before
 the AdamW step. The full lm-100m run is durable/resumable; the val curve toward
-**1.7337** lands over days on `trig` (bf16 CUDA).
+**1.7337** lands over days on a CUDA GPU host (bf16 CUDA).

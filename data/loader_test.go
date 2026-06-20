@@ -68,7 +68,7 @@ func TestLoaderDeterministic(t *testing.T) {
 	}
 }
 
-// real-shard smoke: set LMKIT_SHARD to a real train_*.bin (run on trig). Skipped
+// real-shard smoke: set LMKIT_SHARD to a real train_*.bin (run on a host with a real shard). Skipped
 // when unset, so it never runs in normal CI.
 func TestRealShardSmoke(t *testing.T) {
 	p := os.Getenv("LMKIT_SHARD")

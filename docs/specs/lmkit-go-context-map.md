@@ -101,13 +101,13 @@ Three GPU architectures are available; their GoMLX training paths differ sharply
 
 | GPU | Vendor kernels | PJRT plugin → GoMLX | Status for training |
 |---|---|---|---|
-| **CUDA** (3070 Ti on `trig`, linux/amd64) | cuBLAS/cuDNN | works | **known-good** — primary target |
-| **ROCm** (R9700, AMD) | rocBLAS/MIOpen | exists in OpenXLA, untested via GoMLX | **validate** (ADR-0004) |
-| **Metal** (this Mac, Apple Silicon) | MPSGraph | jax-metal plugin abandoned/version-broken | **revive bridge** (ADR-0004) |
+| **CUDA** (a CUDA GPU, e.g. ~8GB, linux/amd64) | cuBLAS/cuDNN | works | **known-good** — primary target |
+| **ROCm** (an AMD/ROCm GPU) | rocBLAS/MIOpen | exists in OpenXLA, untested via GoMLX | **validate** (ADR-0004) |
+| **Metal** (Apple Silicon, local dev) | MPSGraph | jax-metal plugin abandoned/version-broken | **revive bridge** (ADR-0004) |
 | **CPU** (any) | — | XLA-CPU + pure-Go SimpleGo | dev + parity tests |
 
-Local Mac dev runs on SimpleGo (pure-Go, no cgo) or XLA-CPU for correctness and
-layer-parity work. Real training currently runs on CUDA (`trig`). ROCm and Metal
+Local dev runs on SimpleGo (pure-Go, no cgo) or XLA-CPU for correctness and
+layer-parity work. Real training currently runs on CUDA (the GPU host). ROCm and Metal
 GPU training are explicit workstreams, not assumptions — see ADR-0004.
 
 ## Dependency strategy

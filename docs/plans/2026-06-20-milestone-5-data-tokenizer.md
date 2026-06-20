@@ -6,15 +6,15 @@
 
 **Architecture:** Both are dependency-light, GoMLX-free libraries (ADR-0003/0005). `data` mmaps headerless little-endian `uint16` shards and yields raw `int32` batches via a prefetch goroutine. `tokenizer` is a clean-room HF byte-level BPE, gated byte-exact against Python `tokenizers`.
 
-**Tech Stack:** Go 1.26; `github.com/edsrzf/mmap-go` (data); `github.com/dlclark/regexp2` (tokenizer, GPT-2 split regex with lookahead); Python `tokenizers` on `trig` for the equivalence fixture.
+**Tech Stack:** Go 1.26; `github.com/edsrzf/mmap-go` (data); `github.com/dlclark/regexp2` (tokenizer, GPT-2 split regex with lookahead); Python `tokenizers` on a host with Python tokenizers for the equivalence fixture.
 
 ## Global Constraints
 
 - **Pure-Go, GoMLX-free (ADR-0005):** neither module imports any `github.com/gomlx/*`. They trivially pass the runtime boundary test (`-count=1`).
 - **Read existing shards (chosen):** the DataLoader reads the lm-100m-en `.bin` shards; no Go sharder, no BPE training, no corpus pull.
-- **Shard format:** raw, headerless, **little-endian `uint16`**, 1 token = 1 uint16. Valid on LE hosts (x86-64 trig, arm64 Mac); document the LE assumption.
+- **Shard format:** raw, headerless, **little-endian `uint16`**, 1 token = 1 uint16. Valid on LE hosts (x86-64 linux, arm64 darwin); document the LE assumption.
 - **Tokenizer correctness = byte-exact vs Python (ADR-0003):** the committed equivalence fixture is the arbiter — match the *fixture*, never loosen it.
-- **PyTorch/HF on `trig`:** the fixture generator runs on `trig` (a venv with `tokenizers`); `tokenizer.json` + fixtures are copied back and committed.
+- **PyTorch/HF on the GPU host:** the fixture generator runs on a host with a Python venv with `tokenizers`; `tokenizer.json` + fixtures are copied back and committed.
 - SimpleGo not relevant (no GoMLX). Commits: terse, verb-first, no dashes, no Claude/Anthropic attribution.
 
 ---
@@ -239,7 +239,7 @@ func TestLoaderDeterministic(t *testing.T) {
 	}
 }
 
-// real-shard smoke: set LMKIT_SHARD to a real train_*.bin (run on trig). Skipped
+// real-shard smoke: set LMKIT_SHARD to a real train_*.bin (run on a host with a real shard). Skipped
 // when unset, so it never runs in normal CI.
 func TestRealShardSmoke(t *testing.T) {
 	p := os.Getenv("LMKIT_SHARD")
@@ -386,13 +386,15 @@ func (l *Loader) Close() error {
 ```
 Run: `cd data && go test ./... -run TestLoader -v` → PASS (TestLoaderNextToken, TestLoaderDeterministic; TestRealShardSmoke skipped).
 
-- [ ] **Step 3: Real-shard smoke on `trig`** (pure-Go, cross-compile the test binary)
+- [ ] **Step 3: Real-shard smoke on the GPU host** (pure-Go, cross-compile the test binary)
+
+`$GPU_HOST` = your CUDA host. `$DATA_DIR` = the lm-100m-en data dir on that host.
 
 ```bash
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o /tmp/data.test ./data/
-scp /tmp/data.test trig:/tmp/data.test
-ssh trig 'LMKIT_SHARD=$HOME/projects/training/lm-100m-en/data/train_00000.bin /tmp/data.test -test.run TestRealShardSmoke -test.v'
-ssh trig 'rm -f /tmp/data.test'; rm -f /tmp/data.test
+scp /tmp/data.test "$GPU_HOST":/tmp/data.test
+ssh "$GPU_HOST" 'LMKIT_SHARD=$DATA_DIR/train_00000.bin /tmp/data.test -test.run TestRealShardSmoke -test.v'
+ssh "$GPU_HOST" 'rm -f /tmp/data.test'; rm -f /tmp/data.test
 ```
 Expected: PASS — logs the shard token count (~500M) and a first block of valid `< 32000` ids.
 
@@ -408,7 +410,7 @@ git add data/ scripts/check.sh
 git commit -m "data: next-token block DataLoader over mmap shards
 
 Prefetch goroutine yields random (x,y) blocks as int32; deterministic by seed;
-Close waits for the filler before unmapping. Real-shard smoke verified on trig."
+Close waits for the filler before unmapping. Real-shard smoke verified on the GPU host."
 ```
 
 ---
@@ -418,7 +420,7 @@ Close waits for the filler before unmapping. Real-shard smoke verified on trig."
 **Files:**
 - Create: `tokenizer/go.mod`
 - Modify: `go.work` (add `./tokenizer`)
-- Create: `tokenizer/testdata/tokenizer.json` (copied from `trig`)
+- Create: `tokenizer/testdata/tokenizer.json` (copied from the GPU host)
 - Create: `tokenizer/bytelevel.go`
 - Create: `tokenizer/tokenizer.go`
 - Create: `tokenizer/tokenizer_test.go`
@@ -435,10 +437,10 @@ module github.com/guygrigsby/lmkit-go/tokenizer
 
 go 1.26
 ```
-Add `./tokenizer` to `go.work`. Copy the real tokenizer from `trig` (the artifact we load + test against):
+Add `./tokenizer` to `go.work`. Copy the real tokenizer from the GPU host (the artifact we load + test against):
 ```bash
 mkdir -p tokenizer/testdata
-scp trig:'$HOME/projects/training/lm-100m-en/data/tokenizer.json' tokenizer/testdata/tokenizer.json
+scp "$GPU_HOST":'$DATA_DIR/tokenizer.json' tokenizer/testdata/tokenizer.json
 ```
 Then `cd tokenizer && go get github.com/dlclark/regexp2@latest && cd ..`
 
@@ -652,7 +654,7 @@ git commit -m "tokenizer: load HF byte-level BPE tokenizer.json + decode"
 - Create: `tokenizer/bpe.go`
 - Modify: `tokenizer/tokenizer.go` (add `Encode`)
 - Create: `tokenizer/testdata/gen_encodings.py`
-- Create: `tokenizer/testdata/encodings.json` (generated on `trig`)
+- Create: `tokenizer/testdata/encodings.json` (generated on the GPU host)
 - Create: `tokenizer/encode_test.go`
 
 **Interfaces:**
@@ -745,7 +747,7 @@ func splitGPT2(text string) []string {
 ```python
 #!/usr/bin/env python3
 """Generate the byte-level BPE equivalence fixture from the reference Python
-tokenizer. Run on trig in a venv with `tokenizers`:
+tokenizer. Run on a host with a venv with `tokenizers`:
     python gen_encodings.py  # reads tokenizer.json, writes encodings.json
 """
 import json
@@ -770,14 +772,16 @@ with open("encodings.json", "w") as f:
     json.dump(out, f, ensure_ascii=False, indent=0)
 print(f"wrote encodings.json: {len(out)} cases")
 ```
-Generate on `trig` (it has `tokenizer.json`; use a venv with `tokenizers` — the cuda venv likely has it, else `pip install tokenizers` in a throwaway):
+Generate on the GPU host (it has `tokenizer.json` at `$DATA_DIR`; use a Python venv with `tokenizers`, else `pip install tokenizers` in a throwaway):
+`$GPU_HOST` = your CUDA host. `$DATA_DIR` = the lm-100m-en data dir on that host.
+
 ```bash
-scp tokenizer/testdata/gen_encodings.py trig:'$HOME/projects/training/lm-100m-en/data/gen_encodings.py'
-ssh trig 'cd ~/projects/training/lm-100m-en/data && (~/venvs/cuda/bin/python -c "import tokenizers" 2>/dev/null && ~/venvs/cuda/bin/python gen_encodings.py || python3 gen_encodings.py)'
-scp trig:'$HOME/projects/training/lm-100m-en/data/encodings.json' tokenizer/testdata/encodings.json
-ssh trig 'cd ~/projects/training/lm-100m-en/data && rm -f gen_encodings.py encodings.json'
+scp tokenizer/testdata/gen_encodings.py "$GPU_HOST":'$DATA_DIR/gen_encodings.py'
+ssh "$GPU_HOST" 'cd $DATA_DIR && (python -c "import tokenizers" 2>/dev/null && python gen_encodings.py || python3 gen_encodings.py)'
+scp "$GPU_HOST":'$DATA_DIR/encodings.json' tokenizer/testdata/encodings.json
+ssh "$GPU_HOST" 'cd $DATA_DIR && rm -f gen_encodings.py encodings.json'
 ```
-Expected: `encodings.json` with 10 `{text, ids}` cases lands in `tokenizer/testdata/`. (If `import tokenizers` fails in every venv, STOP and report — the gate needs the reference. Confirm which interpreter on trig has `tokenizers`.)
+Expected: `encodings.json` with 10 `{text, ids}` cases lands in `tokenizer/testdata/`. (If `import tokenizers` fails in every venv, STOP and report — the gate needs the reference. Confirm which Python on the GPU host has `tokenizers`.)
 
 - [ ] **Step 4: Write the failing equivalence + round-trip test**
 
@@ -858,10 +862,10 @@ Python tokenizers reference byte-exact on a committed fixture; Decode round-trip
 - `data` module + go.work + gate → Tasks 1/2.
 - Shard mmap uint16 (LE, zero-copy, Close lifetime) → Task 1.
 - DataLoader next-token (x,y) int32 blocks, batch, prefetch, determinism, multi-shard, train/val by shard list → Task 2.
-- real-shard smoke on trig → Task 2 Step 3.
+- real-shard smoke on the GPU host → Task 2 Step 3.
 - `tokenizer` module + go.work + gate → Tasks 3/4.
 - Load tokenizer.json (vocab/merges/added/ByteLevel), byte<->unicode, Decode → Task 3.
-- Encode (ByteLevel pretok via regexp2 + BPE), equivalence gate vs Python on trig, round-trip → Task 4.
+- Encode (ByteLevel pretok via regexp2 + BPE), equivalence gate vs Python on the GPU host, round-trip → Task 4.
 - both GoMLX-free / boundary clean → no gomlx imports anywhere in data/ or tokenizer/.
 
 **Out of scope, correctly absent:** BPE training, corpus pull, Go sharder, the training loop's use, chat templates/offsets/padding.

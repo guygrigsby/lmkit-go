@@ -16,7 +16,7 @@ lm-100m-en pipeline:
 The production training loop's *use* of these is the next milestone; this milestone
 builds and validates the inputs.
 
-## Ground truth (lm-100m-en, on `trig` at `~/projects/training/lm-100m-en/data/`)
+## Ground truth (lm-100m-en, at `$DATA_DIR` — the lm-100m-en data dir on the GPU host)
 - Shards: 23 `train_*.bin` + 1 `val_*.bin`, each ~954 MB, **raw headerless
   little-endian `uint16`** (nanoGPT-style; 1 token = 1 uint16). `block_size = 2048`.
 - Tokenizer: `tokenizer.json` — HF **byte-level BPE** (`model.type: BPE`,
@@ -46,13 +46,13 @@ builds and validates the inputs.
   disk — no content-hash split at our layer).
 
 ### Testing
-- Unit (Mac, synthetic): write tiny `.bin` files of known `uint16`, assert: token
+- Unit (local, synthetic): write tiny `.bin` files of known `uint16`, assert: token
   count, block extraction values, next-token offset (`y[k] == x[k+1]`), batch shape,
   determinism (same seed → same batches; different seed → different), boundary (no
   read past `len-BlockSize-1`), multi-shard sampling covers all shards.
-- Smoke (`trig`, real shard): open one `train_*.bin`, pull a batch, assert every
-  token `< 32000` and blocks are full-length. (Run on `trig`; the 24 GB of shards
-  stay there.)
+- Smoke (real shard, `$GPU_HOST`): open one `train_*.bin`, pull a batch, assert every
+  token `< 32000` and blocks are full-length. Run on a host with the real shards;
+  the 24 GB of shards stay there. (`$GPU_HOST` = your CUDA host.)
 
 ---
 
@@ -80,7 +80,7 @@ builds and validates the inputs.
 ### Equivalence gate (ADR-0003, non-negotiable)
 Byte-level BPE has many edge cases; "pure-Go" is only trustworthy if proven
 identical to the reference. A committed fixture
-`tokenizer/testdata/encodings.json` of `{text → ids}` is **generated on `trig`** by
+`tokenizer/testdata/encodings.json` of `{text → ids}` is **generated on a host with Python HF `tokenizers`** by
 Python HF `tokenizers` over a representative sample (varied prose, whitespace,
 punctuation, unicode, leading/trailing spaces, and a slice of the real corpus). A Go
 test asserts `Encode(text) == ids` for every case, and `Decode(Encode(text)) == text`
@@ -110,7 +110,7 @@ tokenizer/
   bpe.go            (ranked-merge application)
   *_test.go
   testdata/
-    gen_encodings.py   (Python HF reference generator, run on trig)
+    gen_encodings.py   (Python HF reference generator, run on a host with Python tokenizers)
     encodings.json     (committed fixture)
 ```
 
@@ -131,7 +131,7 @@ tokenizer/
 ## Done criteria
 - [ ] `data` + `tokenizer` modules in `go.work`; build clean; boundary clean.
 - [ ] `data` DataLoader yields correct next-token `(x,y)` blocks; deterministic;
-      synthetic unit tests green + a real-shard smoke on `trig`.
+      synthetic unit tests green + a real-shard smoke on a host with the real shards.
 - [ ] `tokenizer` loads `tokenizer.json`, encode/decode; the Python equivalence gate
       passes (byte-exact) + round-trip.
 - [ ] `make check` (both modules) ends OK.

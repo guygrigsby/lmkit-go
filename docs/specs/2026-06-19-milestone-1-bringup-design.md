@@ -12,7 +12,7 @@ boundary, can do the three things every later milestone depends on:
 2. a **gradient** (reverse-mode autodiff) that is numerically correct,
 3. an **AdamW optimizer step** that measurably reduces a toy loss,
 
-on **CPU** (this Mac, via SimpleGo and XLA-CPU) and on **CUDA** (`trig`,
+on **CPU** (locally, via SimpleGo and XLA-CPU) and on **CUDA** (a CUDA GPU host,
 linux/amd64). Nothing here trains a model — it establishes the foundation and the
 backend boundary.
 
@@ -94,27 +94,26 @@ Per `DESIGN.md` validation philosophy — prove numerically before claiming it w
 - **AdamW:** minimize f(x)=Σ(x−c)² from a random start; assert loss < 1e-3 after a
   fixed step budget, and x ≈ c.
 - **boundary:** the grep test is part of the gate, not a manual check.
-- **the real path (per workflow rules):** run the quickstart binary on the Mac
-  (SimpleGo and XLA-CPU) and on `trig` (CUDA), and record that each printed the
+- **the real path (per workflow rules):** run the quickstart binary locally
+  (SimpleGo and XLA-CPU) and on a CUDA GPU host, and record that each printed the
   passing checks + the device it used. A green CPU run is not a green CUDA run —
   both are required for "done".
 
 ## Environments
 
-- **Mac (here):** SimpleGo (pure-Go, no cgo) as the zero-friction default;
+- **Local (dev machine):** SimpleGo (pure-Go, no cgo) as the zero-friction default;
   XLA-CPU as the second CPU path. Both CPU.
-- **`trig`:** CUDA via the PJRT-CUDA plugin (linux/amd64). GPU job wrapped per the
-  GPU-mutex rule; source pulled, not edited on the box.
+- **CUDA GPU host (`$GPU_HOST`):** CUDA via the PJRT-CUDA plugin (linux/amd64). Check the GPU is idle with `nvidia-smi` first; source pulled, not edited on the box.
 
 ## Done criteria
 
 - [x] `go.work` + `backend` and `app` modules; `backend/go.mod` pins a GoMLX
       `main` commit (`516689cbe913`); both modules build clean.
 - [x] Contract tests green locally on SimpleGo (matmul, gradient, AdamW) + the
-      boundary test. (XLA-CPU on the Mac not run — needs XLA libs; covered instead
-      by the CUDA run on `trig`, which exercises the full XLA path.)
-- [x] Quickstart prints passing matmul/grad/AdamW + device on the Mac (SimpleGo).
-- [x] Same quickstart green on `trig` with CUDA selected — see results below.
+      boundary test. (XLA-CPU not run locally — needs XLA libs; covered instead
+      by the CUDA run on the GPU host, which exercises the full XLA path.)
+- [x] Quickstart prints passing matmul/grad/AdamW + device locally (SimpleGo).
+- [x] Same quickstart green on the CUDA GPU host with CUDA selected — see results below.
 - [x] Backend-boundary grep test wired into the gate (runs per module).
 
 ## Validation results (2026-06-19, branch `milestone-1-bringup`)
@@ -122,11 +121,11 @@ Per `DESIGN.md` validation philosophy — prove numerically before claiming it w
 Backend selector is `GOMLX_BACKEND=xla:cuda` (the registered backend is `xla`; CUDA
 is its PJRT plugin — `cuda` alone is not a backend name).
 
-- **Mac, SimpleGo:** `make check` green; quickstart `device: "Go Backend"`,
+- **Local, SimpleGo:** `make check` green; quickstart `device: "Go Backend"`,
   matmul `[58 64 139 154]`, gradient `[2 4 6]`, adamw `w=3.0000 loss=9.09e-13`.
-- **`trig`, SimpleGo (linux/amd64):** cross-compiled here (`CGO_ENABLED=0`),
+- **CUDA GPU host, SimpleGo (linux/amd64):** cross-compiled locally (`CGO_ENABLED=0`),
   rsync'd to `/tmp`, ran green (`loss=5.12e-13`). Proves linux/amd64 portability.
-- **`trig`, CUDA (RTX 3070 Ti):** cross-compiled here with `zig cc`
+- **CUDA GPU host, CUDA (NVIDIA GPU ~8GB):** cross-compiled locally with `zig cc`
   (`CGO_ENABLED=1`, `xla` backend), rsync'd to `/tmp`, ran under
   `GOMLX_BACKEND=xla:cuda`. go-xla auto-installed the `cuda` PJRT plugin (v0.112)
   to `~/.local/lib`. Device: `xla:cuda … pjrt_c_api_cuda_plugin.so v0.112
@@ -134,7 +133,7 @@ is its PJRT plugin — `cuda` alone is not a backend name).
   Binary in `/tmp` cleaned up; no repo on the box (artifact-only deploy).
 
 The core bet holds: GoMLX/XLA behind the `backend` boundary does correct
-matmul + autodiff + AdamW on real CUDA, driven from a Mac-cross-compiled binary.
+matmul + autodiff + AdamW on real CUDA, driven from a cross-compiled binary.
 
 ## Open questions to resolve during the plan
 
