@@ -3,6 +3,7 @@ package model
 import (
 	"math"
 
+	"github.com/gomlx/compute/dtypes"
 	g "github.com/gomlx/gomlx/core/graph"
 	"github.com/gomlx/gomlx/core/tensors"
 )
@@ -34,7 +35,16 @@ func Attention(cfg Config, x, wQ, wK, wV, wO *g.Node, positions []int) *g.Node {
 	scores := g.Einsum("btnh,bsnh->bnts", q, k)
 	scores = g.MulScalar(scores, float32(1.0/math.Sqrt(float64(hd))))
 	scores = g.Add(scores, causalMask(x.Graph(), tt)) // [1,1,T,T] broadcasts
-	probs := g.Softmax(scores, -1)                    // softmax over S (key) axis
+	// softmax in fp32 for stability/fidelity; downcast back to scores' dtype.
+	sdt := scores.DType()
+	sf := scores
+	if sdt != dtypes.Float32 {
+		sf = g.ConvertDType(scores, dtypes.Float32)
+	}
+	probs := g.Softmax(sf, -1) // softmax over S (key) axis
+	if sdt != dtypes.Float32 {
+		probs = g.ConvertDType(probs, sdt)
+	}
 	// out[B,T,nH,hd] = probs·v.
 	out := g.Einsum("bnts,bsnh->btnh", probs, v)
 	merged := g.Reshape(out, b, tt, nH*hd) // [B,T,nH*hd]
