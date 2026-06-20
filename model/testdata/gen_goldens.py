@@ -56,7 +56,24 @@ def gen_swiglu():
     write("swiglu", {"hidden": H, "ffn_hidden": F_},
           {"x": x}, {"Wg": Wg, "Wu": Wu, "Wd": Wd}, y)
 
+def gen_embedding():
+    V, H, B, T = 10, 8, 2, 3
+    table = torch.randn(V, H)
+    ids = torch.randint(0, V, (B, T), dtype=torch.int32)
+    embed = table[ids.long()]
+    h = torch.randn(B, T, H)
+    logits = h @ table.t()
+    obj = {"config": {"vocab": V, "hidden": H},
+           "inputs": {"ids": t2j(ids), "h": t2j(h)},
+           "weights": {"table": t2j(table)},
+           "expected_embed": t2j(embed),
+           "expected_logits": t2j(logits)}
+    with open("embedding.json", "w") as f:
+        json.dump(obj, f)
+    print("wrote embedding.json")
+
 if __name__ == "__main__":
     gen_rmsnorm()
     gen_rope()
     gen_swiglu()
+    gen_embedding()
