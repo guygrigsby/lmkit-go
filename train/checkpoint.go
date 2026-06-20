@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/gomlx/gomlx/ml/model"
 	"github.com/gomlx/gomlx/ml/model/checkpoint"
@@ -80,49 +79,3 @@ func resumeIfPresent(store *model.Store, dir string) (int64, *checkpoint.Handler
 	return step, h, nil
 }
 
-// pruneCheckpointsInDir removes all but the `keep` most recent checkpoint pairs
-// (matched by base name) in dir. When keep <= 0, removes all. This is a safety net;
-// checkpoint.Build(...).Keep(n) auto-prunes on each Save, so this is only needed for
-// directories not managed by a single Handler with Keep configured.
-func pruneCheckpointsInDir(dir string, keep int) error {
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	// Collect base names (without .json/.bin suffix), deduplicated and sorted.
-	seen := map[string]struct{}{}
-	var bases []string
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasSuffix(name, checkpoint.JsonNameSuffix) {
-			base := strings.TrimSuffix(name, checkpoint.JsonNameSuffix)
-			if _, ok := seen[base]; !ok {
-				seen[base] = struct{}{}
-				bases = append(bases, base)
-			}
-		}
-	}
-
-	// os.ReadDir returns entries in name order; since base names are time-stamped and
-	// numerically prefixed they sort oldest-first, which is what we want.
-	if keep > 0 && len(bases) <= keep {
-		return nil
-	}
-	remove := bases
-	if keep > 0 {
-		remove = bases[:len(bases)-keep]
-	}
-	for _, base := range remove {
-		for _, suffix := range []string{checkpoint.JsonNameSuffix, checkpoint.BinDataSuffix} {
-			path := filepath.Join(dir, base+suffix)
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-	}
-	return nil
-}

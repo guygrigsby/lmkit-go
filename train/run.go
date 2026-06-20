@@ -165,7 +165,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 
 		// Eval cadence.
 		if cfg.EvalInterval > 0 && int(step)%cfg.EvalInterval == 0 {
-			valLoss, err := evalLoss(evalExec, valLoader, cfg, mcfg)
+			valLoss, err := evalLoss(evalExec, valLoader, cfg)
 			if err != nil {
 				return 1, fmt.Errorf("run: eval step %d: %w", step, err)
 			}
@@ -277,7 +277,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 }
 
 // evalLoss computes the mean CE loss over EvalIters val batches.
-func evalLoss(evalExec *model.Exec, valLoader *data.Loader, cfg Config, mcfg lmodel.Config) (float64, error) {
+func evalLoss(evalExec *model.Exec, valLoader *data.Loader, cfg Config) (float64, error) {
 	var sum float64
 	n := cfg.EvalIters
 	if n <= 0 {
