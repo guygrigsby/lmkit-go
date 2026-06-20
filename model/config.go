@@ -9,18 +9,19 @@ import (
 )
 
 // Config holds Llama block hyperparameters. Only the fields a given block needs
-// are read by that block. JSON tags mirror the Python lmkit ModelConfig so a
-// model.json round-trips between the two stacks. Block is the context length
-// (max sequence / RoPE positions); the data loader sizes its blocks from it.
+// are read by that block. JSON tags match the Python lmkit convention used by the
+// golden fixtures (model/testdata/model.json) so a model.json round-trips between
+// the two stacks. SeqLen is the context length (max sequence / RoPE positions);
+// the data loader sizes its blocks from it.
 type Config struct {
+	VocabSize int     `json:"vocab"`
 	Hidden    int     `json:"hidden"`
-	NLayers   int     `json:"n_layer"`
-	NHeads    int     `json:"n_head"`
+	NLayers   int     `json:"n_layers"`
+	NHeads    int     `json:"n_heads"`
 	NKVHeads  int     `json:"n_kv_heads"`
 	HeadDim   int     `json:"head_dim"`
-	FFNHidden int     `json:"intermediate"`
-	VocabSize int     `json:"vocab_size"`
-	Block     int     `json:"block"`
+	FFNHidden int     `json:"ffn_hidden"`
+	SeqLen    int     `json:"seq_len"`
 	RopeBase  float64 `json:"rope_base"`
 	RMSEps    float64 `json:"rms_eps"`
 }

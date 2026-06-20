@@ -16,7 +16,7 @@ import (
 // loaders over the shards, and run the loop. It is generic (no lm-100m constants);
 // the example package supplies the configs. Returns the process exit code.
 func trainCmd(args []string) int {
-	fs := flag.NewFlagSet("train", flag.ExitOnError)
+	fs := flag.NewFlagSet("train", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to the train config JSON")
 	modelPath := fs.String("model", "", "path to the model config JSON")
 	dataDir := fs.String("data", "", "shard directory (overrides the config's data_dir)")
@@ -43,13 +43,13 @@ func trainCmd(args []string) int {
 	if *dataDir != "" {
 		dir = *dataDir
 	}
-	trainLoader, err := newLoader(dir, "train_*.bin", mcfg.Block, cfg.BatchSize, cfg.Seed)
+	trainLoader, err := newLoader(dir, "train_*.bin", mcfg.SeqLen, cfg.BatchSize, cfg.Seed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 		return 1
 	}
 	defer trainLoader.Close()
-	valLoader, err := newLoader(dir, "val_*.bin", mcfg.Block, cfg.BatchSize, cfg.Seed+1)
+	valLoader, err := newLoader(dir, "val_*.bin", mcfg.SeqLen, cfg.BatchSize, cfg.Seed+1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 		return 1

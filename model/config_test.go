@@ -6,13 +6,15 @@ import (
 	"testing"
 )
 
-// TestLoadConfig checks the snake_case JSON tags map onto the struct fields. A wrong
-// tag would silently leave a field at its zero value, so assert each one round-trips.
+// TestLoadConfig gates the JSON tags against the Python-stack convention used by the
+// golden fixtures (model/testdata/model.json): vocab, n_layers, n_heads, ffn_hidden,
+// seq_len. A tag that diverges from that convention would silently leave its field at
+// zero, so this fixture uses those exact keys with lm-100m values and asserts each one.
 func TestLoadConfig(t *testing.T) {
 	const j = `{
-		"hidden": 768, "n_layer": 12, "n_head": 12, "n_kv_heads": 4,
-		"head_dim": 64, "intermediate": 2048, "vocab_size": 32000,
-		"block": 2048, "rope_base": 10000, "rms_eps": 1e-5
+		"vocab": 32000, "hidden": 768, "n_layers": 12, "n_heads": 12,
+		"n_kv_heads": 4, "head_dim": 64, "ffn_hidden": 2048,
+		"seq_len": 2048, "rope_base": 10000, "rms_eps": 1e-5
 	}`
 	p := filepath.Join(t.TempDir(), "model.json")
 	if err := os.WriteFile(p, []byte(j), 0o644); err != nil {
@@ -23,8 +25,8 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 	want := Config{
-		Hidden: 768, NLayers: 12, NHeads: 12, NKVHeads: 4, HeadDim: 64,
-		FFNHidden: 2048, VocabSize: 32000, Block: 2048, RopeBase: 10000, RMSEps: 1e-5,
+		VocabSize: 32000, Hidden: 768, NLayers: 12, NHeads: 12, NKVHeads: 4,
+		HeadDim: 64, FFNHidden: 2048, SeqLen: 2048, RopeBase: 10000, RMSEps: 1e-5,
 	}
 	if c != want {
 		t.Errorf("LoadConfig =\n %+v\nwant\n %+v", c, want)
