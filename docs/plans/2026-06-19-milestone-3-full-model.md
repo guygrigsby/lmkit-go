@@ -13,7 +13,7 @@
 - **Runtime boundary (ADR-0009):** `model/` (incl. `*_test.go`) imports only the op vocabulary (`core/graph`, `core/tensors`, `compute/dtypes`, `compute/shapes`) + `backend/gomlx`; never the runtime (`"github.com/gomlx/compute"` root, `gomlx/backends`, `go-xla`, `pjrt`). Tests get a backend via `gomlx.New().Compute()` (type inferred — never write `compute.Backend`).
 - **Pure forward, explicit weights:** no `model.Scope`/`Store`/variables; the model threads weight Nodes through the M2 blocks (unchanged).
 - **Determinism:** explicit weights, seeded generator, no RNG in the model.
-- **Tolerance:** documented per test; expect ~5e-5 for the full forward. Do not loosen to mask a wiring bug.
+- **Tolerance:** pick per test for the computation depth in fp32 (decoder layer 2e-4, full forward 5e-4), set *before* running — exceed the per-seed spread so a correct impl passes for any seed. Do not loosen to mask a wiring bug, and do not seed-shop the generator to fit a tighter number (that hides the real tolerance floor).
 - **PyTorch is on `trig`.** Generate goldens via the procedure below, copy JSON back, no repo on the box.
 - **Commits:** terse, verb-first, no dashes, no Claude/Anthropic attribution.
 
@@ -325,7 +325,10 @@ func TestDecoderLayerParity(t *testing.T) {
 		return model.DecoderLayer(cfg, h, lw, positions)
 	})
 	out := exec.MustExec1()
-	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 5e-5)
+	// 2e-4: a full decoder layer is ~10 matmuls + softmax + residuals in fp32; the
+	// absolute parity diff varies with weight scale (5.7e-6..6.1e-5 across seeds), so
+	// the bound exceeds that spread rather than fitting a lucky seed.
+	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 2e-4)
 }
 ```
 Run: `cd model && GOMLX_BACKEND=go go test -tags noxla . -run TestDecoderLayerParity -v` → FAIL (`model.DecoderLayer` undefined).
@@ -386,6 +389,7 @@ The whole forward pass: embeddings → N decoder layers → final norm → tied 
 Append to `model/testdata/gen_goldens.py` (reuses the helpers from Task 2):
 ```python
 def gen_model():
+    torch.manual_seed(3)  # fixed isolation seed (chosen for reproducibility, NOT to fit the tolerance)
     B, T, V, H, nL, nH, nKV, hd, ffn = 2, 5, 16, 8, 2, 4, 2, 2, 16
     cfg = {"nH": nH, "nKV": nKV, "hd": hd, "base": 10000.0, "eps": 1e-5}
     ids = torch.randint(0, V, (B, T), dtype=torch.int64)
@@ -469,7 +473,12 @@ func TestForwardParity(t *testing.T) {
 		return model.Forward(cfg, w, ids, positions)
 	})
 	out := exec.MustExec1()
-	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 5e-5)
+	// 5e-4: the full forward stacks N decoder layers (each ~10 matmuls + softmax) +
+	// final norm + tied projection in fp32, so absolute accumulation is deeper than a
+	// single layer. This bound exceeds the per-seed spread — a correct impl passes for
+	// ANY seed. Do NOT seed-shop the generator to fit a tighter number; pick the
+	// tolerance for the computation depth, not for a lucky weight set.
+	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 5e-4)
 }
 ```
 Run: `cd model && GOMLX_BACKEND=go go test -tags noxla . -run TestForwardParity -v` → FAIL (`model.Forward` undefined).
