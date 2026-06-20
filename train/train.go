@@ -32,6 +32,8 @@ func Overfit(cfg lmodel.Config, inputs, labels *tensors.Tensor, steps int, lr, w
 	store.RootScope().SetParam(model.ParamInitialSeed, seed)
 
 	tt := inputs.Shape().Dimensions[1] // T
+	// Dense positions 0..T-1: correct for one fixed, unpadded batch. Variable-length
+	// or packed-sequence training will need per-row position ids instead.
 	positions := make([]int, tt)
 	for i := range positions {
 		positions[i] = i
