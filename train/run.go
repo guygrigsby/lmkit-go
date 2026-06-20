@@ -127,10 +127,20 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	evalExec := model.MustNewExec(bk.Compute(), store, noGradLossFn(mcfg, positions, computeDT))
 
 	// Track best val loss for best-checkpoint.
-	// C1: on resume, restore prior best so we don't overwrite best/ with a worse model.
-	bestVal := priorBestVal(metricsPath)
-	if step == 0 {
-		bestVal = math.MaxFloat64
+	// Finding 2: prefer best_val from the store (survives checkpoint without metrics.jsonl).
+	// Fall back to priorBestVal (metrics.jsonl scan) for old checkpoints without the variable,
+	// then to MaxFloat64 for fresh runs.
+	bestValVar := store.RootScope().VariableWithValue("best_val", math.MaxFloat64).SetTrainable(false)
+	bestVal := func() float64 {
+		t, err := bestValVar.Value()
+		if err != nil || t == nil {
+			return math.MaxFloat64
+		}
+		return shapes.ConvertTo[float64](t.Value())
+	}()
+	if bestVal == math.MaxFloat64 {
+		// Variable absent or not restored (fresh run or old checkpoint): scan metrics.jsonl.
+		bestVal = priorBestVal(metricsPath)
 	}
 
 	// Emit start or resume event.
@@ -145,6 +155,9 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 
 	np := nParams(mcfg)
 	batchTokens := cfg.BatchSize * trainLoader.BlockSize() * cfg.GradAccum // tokens per optimizer step
+
+	// lastStepLoss tracks the most recent training loss for inclusion in eval events.
+	var lastStepLoss float64
 
 	for int(step) < cfg.MaxSteps {
 		if ctx.Err() != nil {
@@ -169,19 +182,26 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 			if err != nil {
 				return 1, fmt.Errorf("run: eval step %d: %w", step, err)
 			}
-			isBest := valLoss < bestVal
-			if isBest {
+			improved := valLoss < bestVal
+			if improved {
 				bestVal = valLoss
+				// Update the store variable so the next checkpoint persists it.
+				_ = bestValVar.SetValue(tensors.FromScalar[float64](bestVal))
 				if err := saveCheckpoint(store, filepath.Join(cfg.OutDir, "best")); err != nil {
 					return 1, fmt.Errorf("run: best checkpoint: %w", err)
 				}
 			}
+			// Spec (M6): eval event fields: val_loss, val_perplexity, best_val, train_loss, lr, improved.
+			// val_perplexity = exp(min(val_loss, 20)) to avoid overflow on divergent evals.
 			_ = emit(metricsPath, map[string]any{
 				"event":          "eval",
 				"step":           step,
 				"val_loss":       valLoss,
-				"val_perplexity": math.Exp(valLoss),
-				"best":           isBest,
+				"val_perplexity": math.Exp(math.Min(valLoss, 20)),
+				"best_val":       bestVal,
+				"train_loss":     lastStepLoss,
+				"lr":             getLR(int(step), cfg),
+				"improved":       improved,
 			})
 		}
 
@@ -215,6 +235,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 			return batchToTensors(b, cfg.BatchSize, trainLoader.BlockSize())
 		})
 		stepDur := time.Since(t0)
+		lastStepLoss = stepLoss
 
 		// Non-finite loss: save diverged state to nan/ (NOT latest/) so latest/ stays
 		// resumable. Intentional deviation from the brief — keeps latest/ last-good.

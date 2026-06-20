@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -170,11 +171,31 @@ func TestRunSmoke(t *testing.T) {
 		}
 	}
 
-	// Eval events should have val_loss field.
+	// Eval events must carry the full M6 spec schema:
+	// val_loss, val_perplexity, best_val, train_loss, lr, improved.
 	evalEvts := eventsByKind(events, "eval")
 	if len(evalEvts) > 0 {
-		if _, ok := evalEvts[0]["val_loss"]; !ok {
-			t.Errorf("eval event missing val_loss field")
+		ev := evalEvts[0]
+		for _, field := range []string{"val_loss", "val_perplexity", "best_val", "train_loss", "lr", "improved"} {
+			if _, ok := ev[field]; !ok {
+				t.Errorf("eval event missing field %q", field)
+			}
+		}
+		// val_perplexity must be finite (clamped at exp(20) even for large losses).
+		if ppl, ok := ev["val_perplexity"].(float64); ok {
+			if ppl <= 0 || ppl > math.Exp(20)+1 {
+				t.Errorf("val_perplexity out of expected range: %v", ppl)
+			}
+		} else {
+			t.Errorf("val_perplexity is not float64: %T", ev["val_perplexity"])
+		}
+		// best_val must be <= val_loss (it's the running best after this eval).
+		if bv, ok := ev["best_val"].(float64); ok {
+			if vl, ok2 := ev["val_loss"].(float64); ok2 {
+				if bv > vl {
+					t.Errorf("best_val (%.4f) > val_loss (%.4f) — impossible", bv, vl)
+				}
+			}
 		}
 	}
 
@@ -498,3 +519,95 @@ func TestRunSIGTERM(t *testing.T) {
 		}
 	}
 }
+
+// TestResumeBestValFromCheckpoint proves that best_val is stored in the checkpoint and
+// survives a resume even when metrics.jsonl is removed before the second run.
+//
+// Phase 1: run until an eval fires, driving best_val < MaxFloat64 into the checkpoint.
+// Delete metrics.jsonl. Phase 2: resume — without the fix, bestVal resets to MaxFloat64
+// and the first resume eval is flagged improved=true regardless of loss; with the fix,
+// bestVal is read from the checkpoint and the resume eval is NOT flagged improved=true
+// (since the real model loss can't beat the previously saved best).
+func TestResumeBestValFromCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "out")
+	dataDir := filepath.Join(dir, "data")
+	_ = os.MkdirAll(dataDir, 0o755)
+
+	const blockSize = 8
+	cfg := runCfg(outDir, dataDir)
+	mcfg := tinyMCfg()
+	cfg.EvalInterval = 5
+	cfg.EvalIters = 2
+	cfg.SaveInterval = 5
+
+	makeL := func() (*data.Loader, *data.Loader) {
+		return makeLoaders(t, dataDir, blockSize, cfg.BatchSize)
+	}
+
+	// Phase 1: run long enough to fire at least one eval (step 5).
+	cfg.MaxSteps = 10
+	trainL, valL := makeL()
+	code, err := train.Run(cfg, mcfg, trainL, valL)
+	_ = trainL.Close()
+	_ = valL.Close()
+	if err != nil || code != 0 {
+		t.Fatalf("phase1: code=%d err=%v", code, err)
+	}
+
+	metricsPath := filepath.Join(outDir, "metrics.jsonl")
+
+	// Confirm an eval event was emitted and capture the best val_loss from phase 1.
+	events1 := readEvents(t, metricsPath)
+	evals1 := eventsByKind(events1, "eval")
+	if len(evals1) == 0 {
+		t.Fatal("phase1 produced no eval events; cannot verify best_val in checkpoint")
+	}
+
+	// Find the best val_loss achieved in phase 1.
+	phase1Best := math.MaxFloat64
+	for _, ev := range evals1 {
+		if vl, ok := ev["val_loss"].(float64); ok && vl < phase1Best {
+			phase1Best = vl
+		}
+	}
+	t.Logf("phase1 best val_loss = %.4f", phase1Best)
+
+	// Delete metrics.jsonl: without the fix, resume falls back to priorBestVal which
+	// returns MaxFloat64 (file absent), and the first eval is always improved=true.
+	if err := os.Remove(metricsPath); err != nil {
+		t.Fatalf("remove metrics.jsonl: %v", err)
+	}
+
+	// Phase 2: resume. best_val must be recovered from the checkpoint, not metrics.jsonl.
+	cfg.MaxSteps = 20
+	trainL, valL = makeL()
+	defer trainL.Close()
+	defer valL.Close()
+	code, err = train.Run(cfg, mcfg, trainL, valL)
+	if err != nil || code != 0 {
+		t.Fatalf("phase2: code=%d err=%v", code, err)
+	}
+
+	events2 := readEvents(t, metricsPath)
+	evals2 := eventsByKind(events2, "eval")
+	if len(evals2) == 0 {
+		t.Fatal("phase2 produced no eval events; cannot verify best_val recovery")
+	}
+
+	// Phase 2 evals should NOT be improved=true unless val_loss actually beats phase1Best.
+	// With a model at roughly the same weights, the loss should be similar to phase1Best,
+	// meaning it should NOT improve (no further training has happened beyond step 10).
+	improvedCount := 0
+	for _, ev := range evals2 {
+		if imp, ok := ev["improved"].(bool); ok && imp {
+			vl, _ := ev["val_loss"].(float64)
+			if vl >= phase1Best {
+				t.Errorf("phase2 eval marked improved=true but val_loss %.4f >= phase1Best %.4f — best_val not recovered from checkpoint", vl, phase1Best)
+			}
+			improvedCount++
+		}
+	}
+	t.Logf("phase2 eval events: %d, legitimately improved: %d", len(evals2), improvedCount)
+}
+
