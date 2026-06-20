@@ -189,5 +189,31 @@
 13567,
 17
 ]
+},
+{
+"text": "<|endoftext|>",
+"ids": [
+0
+]
+},
+{
+"text": "hello <|endoftext|> world",
+"ids": [
+15979,
+82,
+180,
+0,
+872
+]
+},
+{
+"text": "<|im_start|>user\nhi<|im_end|>",
+"ids": [
+2,
+22225,
+178,
+4650,
+3
+]
 }
 ]

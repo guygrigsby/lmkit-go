@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/dlclark/regexp2"
@@ -107,21 +108,74 @@ func (t *Tokenizer) Vocab() map[string]int { return t.vocab }
 
 // Encode tokenizes text to ids via byte-level BPE: optional prefix space, GPT-2
 // regex pre-tokenization, byte->unicode mapping, ranked merges, vocab lookup.
+// Special/added tokens are matched first (longest content wins) and emitted as
+// their single id; the gaps between matches go through the normal BPE path.
 func (t *Tokenizer) Encode(text string) []int {
 	if t.addPrefix && (len(text) == 0 || text[0] != ' ') {
 		text = " " + text
 	}
-	var ids []int
-	for _, piece := range splitGPT2(text) {
-		symbols := make([]string, 0, len(piece))
-		for _, b := range []byte(piece) {
-			symbols = append(symbols, string(t.byteToRune[b]))
+	// Build a longest-first ordering of added token contents so a longer match
+	// always shadows a prefix (e.g. "<|im_start|>" before "<|").
+	type specEntry struct {
+		content string
+		id      int
+	}
+	specs := make([]specEntry, 0, len(t.added))
+	for _, a := range t.added {
+		if a.Content != "" {
+			specs = append(specs, specEntry{a.Content, a.ID})
 		}
-		for _, tok := range t.bpe(symbols) {
-			if id, ok := t.vocab[tok]; ok {
-				ids = append(ids, id)
+	}
+	sort.Slice(specs, func(i, j int) bool {
+		return len(specs[i].content) > len(specs[j].content)
+	})
+
+	var ids []int
+	// encodePlain runs the GPT-2 regex + BPE path on a plain (non-special) segment.
+	encodePlain := func(seg string) {
+		for _, piece := range splitGPT2(seg) {
+			symbols := make([]string, 0, len(piece))
+			for _, b := range []byte(piece) {
+				symbols = append(symbols, string(t.byteToRune[b]))
+			}
+			for _, tok := range t.bpe(symbols) {
+				if id, ok := t.vocab[tok]; ok {
+					ids = append(ids, id)
+				}
 			}
 		}
+	}
+
+	if len(specs) == 0 {
+		encodePlain(text)
+		return ids
+	}
+
+	// Scan left-to-right; at each position try to match a special token.
+	pos := 0
+	plainStart := 0
+	for pos < len(text) {
+		matched := false
+		for _, sp := range specs {
+			if strings.HasPrefix(text[pos:], sp.content) {
+				// Flush any plain text before this match.
+				if plainStart < pos {
+					encodePlain(text[plainStart:pos])
+				}
+				ids = append(ids, sp.id)
+				pos += len(sp.content)
+				plainStart = pos
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			pos++
+		}
+	}
+	// Flush trailing plain text.
+	if plainStart < len(text) {
+		encodePlain(text[plainStart:])
 	}
 	return ids
 }

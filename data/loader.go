@@ -3,6 +3,7 @@ package data
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 )
 
 // Config configures a Loader. Shards are .bin paths; the train/val split is the
@@ -23,12 +24,13 @@ type Batch struct {
 // Loader serves random next-token block batches from mmap'd shards via a prefetch
 // goroutine. Deterministic given Seed.
 type Loader struct {
-	cfg     Config
-	shards  []*Shard
-	rng     *rand.Rand
-	ch      chan Batch
-	done    chan struct{}
-	stopped chan struct{}
+	cfg        Config
+	shards     []*Shard
+	rng        *rand.Rand
+	ch         chan Batch
+	done       chan struct{}
+	stopped    chan struct{}
+	closeOnce  sync.Once
 }
 
 func New(cfg Config) (*Loader, error) {
@@ -96,19 +98,23 @@ func (l *Loader) makeBatch() Batch {
 	return Batch{X: x, Y: y}
 }
 
-// Next returns the next prefetched batch.
+// Next returns the next prefetched batch. Must not be called after Close.
 func (l *Loader) Next() Batch { return <-l.ch }
 
 // Close stops prefetching and unmaps shards. It waits for the fill goroutine to
 // exit before unmapping, so no batch is built from an unmapped shard.
+// Safe to call more than once; subsequent calls are no-ops and return nil.
+// Do not call Next after Close.
 func (l *Loader) Close() error {
-	close(l.done)
-	<-l.stopped
 	var err error
-	for _, s := range l.shards {
-		if e := s.Close(); e != nil {
-			err = e
+	l.closeOnce.Do(func() {
+		close(l.done)
+		<-l.stopped
+		for _, s := range l.shards {
+			if e := s.Close(); e != nil {
+				err = e
+			}
 		}
-	}
+	})
 	return err
 }

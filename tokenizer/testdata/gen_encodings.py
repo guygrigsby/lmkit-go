@@ -19,6 +19,10 @@ SAMPLES = [
     "A longer sentence of clean English prose, the kind the corpus is full of, "
     "to exercise common merges over ordinary words and spacing.",
     "ALLCAPS and MixedCase and snake_case and kebab-case.",
+    # special/added token cases
+    "<|endoftext|>",
+    "hello <|endoftext|> world",
+    "<|im_start|>user\nhi<|im_end|>",
 ]
 out = [{"text": s, "ids": tok.encode(s).ids} for s in SAMPLES]
 with open("encodings.json", "w") as f:
