@@ -23,5 +23,7 @@ func TestSwiGLUParity(t *testing.T) {
 	out := exec.MustExec1(
 		f.Inputs["x"].ToTensor(),
 		f.Weights["Wg"].ToTensor(), f.Weights["Wu"].ToTensor(), f.Weights["Wd"].ToTensor())
-	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 1e-5)
+	// 5e-5: three chained matmuls accumulate more fp32 error than the single-op
+	// blocks (RMSNorm/RoPE); same rationale as the attention block's tolerance.
+	paritytest.AssertClose(t, tensors.MustCopyFlatData[float32](out), f.Expected, 5e-5)
 }

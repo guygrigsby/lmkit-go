@@ -13,6 +13,11 @@ import (
 )
 
 // Tensor is a fixture tensor: row-major float32 data plus its shape.
+// Data is always float32, even for integer fixtures (e.g. token ids): the
+// generator serializes ids as float32 and consumers cast back with int32(v).
+// This is exact only for integers below 2^24; goldens with ids/indices above
+// that range need an integer path added here (a concern for the full-model
+// milestone, not the per-block blocks).
 type Tensor struct {
 	Shape []int     `json:"shape"`
 	Data  []float32 `json:"data"`
