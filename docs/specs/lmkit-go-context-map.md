@@ -31,7 +31,7 @@ a question of PJRT *plugins* (bridges to vendor kernels), not kernels.
 | **backend** | The anti-corruption layer over XLA. Owns the domain types `Tensor`, `Device`, `DType` and the operations `model`/`train` need: build graph, run, gradient, optimizer-step. Selects device + PJRT plugin. | GoMLX / go-xla / PJRT |
 | **tokenizer** | Train and load a 32k BPE; encode/decode. Must load an existing HF `tokenizer.json`. | — (Go-native; see ADR-0003) |
 | **data** | corpus → `uint16` `.bin` shards; mmap `DataLoader` → `(x,y)` block batches; content-hash train/val split. | mmap, file layout |
-| **model** | Llama blocks (RMSNorm, RoPE, GQA attention, SwiGLU FFN, tied embeddings), config-driven. FlashAttention as an XLA op-graph. Built in GoMLX `core/graph` ops (ADR-0009); no runtime/device imports. | GoMLX op vocabulary |
+| **model** | Composable transformer blocks (RMSNorm, RoPE, GQA attention, SwiGLU FFN, tied embeddings), config-driven — a new architecture is a Go `Forward` + the odd block, Config-dispatched. **Arbitrary architectures intended; Llama is the first/reproduction target, not the ceiling.** FlashAttention as an XLA op-graph. Built in GoMLX `core/graph` ops (ADR-0009); no runtime/device imports. | GoMLX op vocabulary |
 | **train** | The loop: AdamW, grad accumulation, grad clip (global-norm), WSD schedule, periodic eval, checkpoint/resume, `metrics.jsonl`. | — |
 | **io** | safetensors read/write, GGUF export, HF Hub push. | file formats, HF API |
 | **app** (`cmd/lmkit` + `internal/`) | CLI composition root: `shard`, `train`, `eval`, `quickstart`; lmkit-specific reproduction glue. | flag parsing |

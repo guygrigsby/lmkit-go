@@ -10,7 +10,9 @@ the data/eval ecosystems.
 ## How to read this — three tiers
 
 The PyTorch ecosystem is decades of breadth. lmkit-go is a narrow vertical:
-*train one Llama on XLA, in Go.* Most of the surface below is **not a gap to close**
+*train transformer LMs on XLA, in Go* — a composable architecture kit (arbitrary
+architectures intended), with a Llama (`lm-100m-en`) as the first reproduction
+target, not the ceiling. Most of the surface below is **not a gap to close**
 — it falls into one of two "not ours to build" buckets:
 
 - **⚙️ Inherited from XLA/GoMLX** — the kernel/compiler/runtime machinery (autograd
@@ -97,7 +99,7 @@ a deliberate later perf milestone — not needed for a 100M model.
 | **Tokenization** (HF `tokenizers`: BPE/byte-level/train/load `tokenizer.json`, normalizers, post-proc, offsets, chat templates) | full Rust lib | ⬜ **gap → next milestone** — pure-Go **byte-level BPE load + encode/decode** for the 32k `tokenizer.json`, equivalence-gated vs Python (ADR-0003); ⬜ BPE *training*, chat templates later |
 | Serialization (**safetensors**, `torch.save`, GGUF, ONNX, sharded checkpoints) | full | ⬜ **safetensors** r/w (io milestone), ⬜ GGUF export; 🚫 ONNX |
 | **Hub** (huggingface_hub, Xet/LFS, cache layout, model cards, `hf` CLI) | full | ⬜ **HF push** (io milestone, net/http+LFS or shell `hf`); 🚫 Xet/CAS infra, hub client breadth |
-| Model libraries (`transformers` 400+ archs + generation, `timm`) | vast | 🚫 we are *one* architecture (Llama), by design |
+| Model libraries (`transformers` 400+ archs + generation, `timm`) | vast | 🟡 **composable transformer blocks** (arbitrary architectures intended; a new arch = a Go `Forward` + the odd block, Config-dispatched). Llama is the first/reproduction target. 🚫 no general module *registry* / `from_pretrained` hub of pretrained archs |
 
 **Read:** **tokenizer + data are the immediate next milestone** (the two ⬜ in
 bold). safetensors/GGUF/hub are the later **io** milestone. The rest (Arrow,
@@ -146,7 +148,8 @@ subsystems**, much of it kernel-deep or whole products. Mapped to lmkit-go:
 shouldn't try — most of that breadth is inherited from XLA or is a separate product.
 The realistic, *achievable* parity is the ~6 user-facing areas above: a
 load → tokenize → shard → **train (full loop)** → eval → export → push pipeline for
-one Llama. Of those, the model is done; **training-loop + tokenizer + data** are the
+transformer LMs (Llama first; the blocks compose to other architectures in Go). Of
+those, the model layer is done; **training-loop + tokenizer + data** are the
 near road, and **io + eval/gen** are the far road. That's the whole comparison: a
 small, finite target inside an enormous ecosystem.
 </content>
