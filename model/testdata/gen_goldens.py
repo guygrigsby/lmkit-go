@@ -31,5 +31,22 @@ def gen_rmsnorm():
     write("rmsnorm", {"hidden": H, "rms_eps": eps},
           {"x": x}, {"scale": scale}, y)
 
+def gen_rope():
+    B, T, nH, hd, base = 2, 4, 2, 8, 10000.0
+    x = torch.randn(B, T, nH, hd)
+    positions = torch.arange(T)
+    inv_freq = 1.0 / (base ** (torch.arange(0, hd, 2).float() / hd))   # [hd/2]
+    freqs = positions[:, None].float() * inv_freq[None, :]            # [T, hd/2]
+    emb = torch.cat([freqs, freqs], dim=-1)                          # [T, hd]
+    cos = emb.cos()[None, :, None, :]                                # [1,T,1,hd]
+    sin = emb.sin()[None, :, None, :]
+    def rotate_half(t):
+        a, b = t[..., : hd // 2], t[..., hd // 2 :]
+        return torch.cat([-b, a], dim=-1)
+    y = x * cos + rotate_half(x) * sin
+    write("rope", {"head_dim": hd, "rope_base": base, "seq_len": T},
+          {"x": x}, {}, y)
+
 if __name__ == "__main__":
     gen_rmsnorm()
+    gen_rope()
