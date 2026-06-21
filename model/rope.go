@@ -27,8 +27,10 @@ func RoPE(x *g.Node, positions []int, base float64, headDim int) *g.Node {
 		}
 	}
 	gr := x.Graph()
-	cosN := g.Const(gr, tensors.FromFlatDataAndDimensions(cos, 1, t, 1, headDim))
-	sinN := g.Const(gr, tensors.FromFlatDataAndDimensions(sin, 1, t, 1, headDim))
+	// cos/sin are built fp32 on the host; cast to x's dtype so the bf16 compute
+	// path (CUDA) does not mix dtypes in the Mul below. No-op when x is fp32.
+	cosN := g.ConvertDType(g.Const(gr, tensors.FromFlatDataAndDimensions(cos, 1, t, 1, headDim)), x.DType())
+	sinN := g.ConvertDType(g.Const(gr, tensors.FromFlatDataAndDimensions(sin, 1, t, 1, headDim)), x.DType())
 	// rotate_half(x) = cat([-x2, x1]) over last axis.
 	x1 := g.Slice(x, g.AxisRange().Spacer(), g.AxisRangeFromStart(half))
 	x2 := g.Slice(x, g.AxisRange().Spacer(), g.AxisRangeToEnd(half))

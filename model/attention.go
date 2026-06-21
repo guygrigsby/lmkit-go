@@ -34,7 +34,9 @@ func Attention(cfg Config, x, wQ, wK, wV, wO *g.Node, positions []int) *g.Node {
 	// scores[B,nH,T,S] = q·kᵀ / sqrt(hd), with q,k shaped [B,T,nH,hd].
 	scores := g.Einsum("btnh,bsnh->bnts", q, k)
 	scores = g.MulScalar(scores, float32(1.0/math.Sqrt(float64(hd))))
-	scores = g.Add(scores, causalMask(x.Graph(), tt)) // [1,1,T,T] broadcasts
+	// causalMask is a host fp32 constant; cast to scores' dtype so the bf16
+	// compute path does not mix dtypes in the Add. No-op when scores is fp32.
+	scores = g.Add(scores, g.ConvertDType(causalMask(x.Graph(), tt), scores.DType())) // [1,1,T,T] broadcasts
 	// softmax in fp32 for stability/fidelity; downcast back to scores' dtype.
 	sdt := scores.DType()
 	sf := scores
