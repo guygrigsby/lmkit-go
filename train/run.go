@@ -69,7 +69,7 @@ func nParams(mcfg lmodel.Config) int {
 // no weight updates). Reuses the same fp32 CE path as the training stepper.
 func noGradLossFn(mcfg lmodel.Config, positions []int, computeDT dtypes.DType) func(*model.Scope, *g.Node, *g.Node) *g.Node {
 	return func(scope *model.Scope, x, y *g.Node) *g.Node {
-		return modelLoss(scope, x.Graph(), mcfg, x, y, computeDT, positions)
+		return modelLoss(scope, x.Graph(), mcfg, x, y, computeDT, positions, false) // eval: no backward, no checkpointing
 	}
 }
 
@@ -135,7 +135,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	}
 
 	// Build stepper.
-	stepper := NewStepper(bk, store, mcfg, positions, cfg.GradAccum, cfg.GradClip, cfg.WeightDecay, opt, computeDT)
+	stepper := NewStepper(bk, store, mcfg, positions, cfg.GradAccum, cfg.GradClip, cfg.WeightDecay, opt, computeDT, cfg.GradientCheckpoint)
 
 	// Build eval exec (no gradients).
 	evalExec := model.MustNewExec(bk.Compute(), store, noGradLossFn(mcfg, positions, computeDT))

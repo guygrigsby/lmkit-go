@@ -20,13 +20,20 @@ import (
 // modelLoss builds the fp32 next-token CE loss for one micro-batch. Variables are
 // fp32 (master); on CUDA the weights are cast to computeDT (bf16) for the matmuls,
 // logits upcast to fp32 for the loss.
-func modelLoss(scope *model.Scope, gr *g.Graph, mcfg lmodel.Config, x, y *g.Node, computeDT dtypes.DType, positions []int) *g.Node {
+func modelLoss(scope *model.Scope, gr *g.Graph, mcfg lmodel.Config, x, y *g.Node, computeDT dtypes.DType, positions []int, checkpoint bool) *g.Node {
 	w := ModelVars(scope, gr, mcfg) // fp32 vars
 	if computeDT != dtypes.Float32 {
 		w = castWeights(w, computeDT) // ConvertDType each weight node
 	}
-	logits := lmodel.Forward(mcfg, w, x, positions) // computeDT on CUDA
-	logits = g.ConvertDType(logits, dtypes.Float32)  // loss in fp32
+	// Per-layer gradient checkpointing recomputes layer activations in the backward
+	// pass instead of holding them — the only way a deep model fits training on a
+	// small GPU. Off for eval (no backward, so nothing to checkpoint).
+	fwd := lmodel.Forward
+	if checkpoint {
+		fwd = lmodel.ForwardCheckpointed
+	}
+	logits := fwd(mcfg, w, x, positions)            // computeDT on CUDA
+	logits = g.ConvertDType(logits, dtypes.Float32) // loss in fp32
 	return loss.SparseCategoricalCrossEntropyLogits([]*g.Node{y}, []*g.Node{logits})
 }
 
@@ -82,6 +89,7 @@ func NewStepper(
 	weightDecay float64,
 	opt optimizer.Interface,
 	computeDT dtypes.DType,
+	checkpoint bool,
 ) *Stepper {
 	owg, ok := opt.(gomlxtrain.OptimizeWithGradients)
 	if !ok {
@@ -91,7 +99,7 @@ func NewStepper(
 	// accOnlyFn: accumulate gradients, return loss only (no apply).
 	accOnlyFn := func(scope *model.Scope, x, y *g.Node) *g.Node {
 		gr := x.Graph()
-		lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions)
+		lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions, checkpoint)
 		grads := scope.BuildTrainableVariablesGradientsGraph(lossNode)
 		varIdx := 0
 		for v := range scope.IterVariables() {
@@ -109,7 +117,7 @@ func NewStepper(
 	// accApplyFn: accumulate + apply; returns (loss, gradNorm) for the metric.
 	accApplyFn := func(scope *model.Scope, x, y *g.Node) (*g.Node, *g.Node) {
 		gr := x.Graph()
-		lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions)
+		lossNode := modelLoss(scope, gr, mcfg, x, y, computeDT, positions, checkpoint)
 		grads := scope.BuildTrainableVariablesGradientsGraph(lossNode)
 		varIdx := 0
 		for v := range scope.IterVariables() {

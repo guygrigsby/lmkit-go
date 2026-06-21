@@ -3,15 +3,15 @@ module github.com/guygrigsby/lmkit-go/model
 go 1.26
 
 require (
-	github.com/gomlx/compute v0.0.0-20260615181056-6e3a924a46cb
-	github.com/gomlx/gomlx v0.27.4-0.20260619070802-516689cbe913
+	github.com/gomlx/compute v0.0.0-20260621195442-7cf34e76eacb
+	github.com/gomlx/gomlx v0.27.4-0.20260621210417-24b2944874ff
 	github.com/guygrigsby/lmkit-go/backend v0.0.0-00010101000000-000000000000
 )
 
 require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
-	github.com/gomlx/go-xla v0.2.3-0.20260619070432-1b52f9e79214 // indirect
+	github.com/gomlx/go-xla v0.2.3-0.20260621204454-990bccf27de9 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect

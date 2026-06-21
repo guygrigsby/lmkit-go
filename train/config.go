@@ -31,6 +31,12 @@ type Config struct {
 	SaveInterval      int     `json:"save_interval"`
 	SnapshotInterval  int     `json:"snapshot_interval"`
 	KeepLastSnapshots int     `json:"keep_last_snapshots"`
+
+	// GradientCheckpoint enables per-layer rematerialization in the training graph:
+	// layer activations are recomputed in the backward pass instead of held, cutting
+	// peak memory so a deep model fits training on a small GPU (at the cost of one
+	// extra forward per layer). Numerically identical; off by default.
+	GradientCheckpoint bool `json:"gradient_checkpoint"`
 }
 
 // LoadConfig reads a JSON train config.

@@ -43,7 +43,7 @@ func TestStepDescends(t *testing.T) {
 	)
 
 	opt := optimizer.Adam().WeightDecay(weightDecay).LearningRate(lr).Done()
-	s := train.NewStepper(bk, store, cfg, positions, gradAccum, 1.0, 0.0, opt, dtypes.Float32)
+	s := train.NewStepper(bk, store, cfg, positions, gradAccum, 1.0, 0.0, opt, dtypes.Float32, false)
 
 	var startLoss, endLoss float64
 	for i := 0; i < steps; i++ {
@@ -123,7 +123,7 @@ func TestWeightDecayTwoDimOnly(t *testing.T) {
 		store := model.NewStore()
 		store.RootScope().SetParam(model.ParamInitialSeed, int64(1337))
 		opt := optimizer.Adam().LearningRate(0.1).Done() // no WeightDecay on Adam
-		s := train.NewStepper(bk, store, cfg, positions, 1, 1.0, wd, opt, dtypes.Float32)
+		s := train.NewStepper(bk, store, cfg, positions, 1, 1.0, wd, opt, dtypes.Float32, false)
 		s.Step(batch)
 		return snapshotTrainables(t, store)
 	}
