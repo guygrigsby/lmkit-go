@@ -24,6 +24,11 @@ type Config struct {
 	SeqLen    int     `json:"seq_len"`
 	RopeBase  float64 `json:"rope_base"`
 	RMSEps    float64 `json:"rms_eps"`
+
+	// AttnChunk, when > 0, computes attention with chunked online-softmax over the
+	// key axis (block size AttnChunk) instead of the full [B,nH,T,T] score table.
+	// Numerically identical; experimental memory knob. 0 = naive attention.
+	AttnChunk int `json:"attn_chunk,omitempty"`
 }
 
 // LoadConfig reads a JSON model config.

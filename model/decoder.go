@@ -10,7 +10,13 @@ import g "github.com/gomlx/gomlx/core/graph"
 // h is [B,T,Hidden]; positions is [0..T-1].
 func DecoderLayer(cfg Config, h *g.Node, lw LayerWeights, positions []int) *g.Node {
 	eps := float32(cfg.RMSEps)
-	attn := Attention(cfg, RMSNorm(h, lw.AttnNorm, eps), lw.Wq, lw.Wk, lw.Wv, lw.Wo, positions)
+	normed := RMSNorm(h, lw.AttnNorm, eps)
+	var attn *g.Node
+	if cfg.AttnChunk > 0 {
+		attn = AttentionChunked(cfg, normed, lw.Wq, lw.Wk, lw.Wv, lw.Wo, positions, cfg.AttnChunk)
+	} else {
+		attn = Attention(cfg, normed, lw.Wq, lw.Wk, lw.Wv, lw.Wo, positions)
+	}
 	h = g.Add(h, attn)
 	ffn := SwiGLU(RMSNorm(h, lw.FFNNorm, eps), lw.Wgate, lw.Wup, lw.Wdown)
 	return g.Add(h, ffn)
