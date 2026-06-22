@@ -1,0 +1,27 @@
+HloModule jit__lambda, is_scheduled=true, entry_computation_layout={(bf16[2,2048,12,64]{3,2,1,0}, bf16[2,2048,12,64]{3,2,1,0}, bf16[2,2048,12,64]{3,2,1,0})->bf16[2,2048,12,64]{3,2,1,0}}, allow_spmd_sharding_propagation_to_parameters={true,true,true}, allow_spmd_sharding_propagation_to_output={true}, frontend_attributes={fingerprint_before_lhs="b24706d95ddd5c08bbf0ef252aff2b5a"}
+
+FileNames
+1 "/tmp/jax_flash_spec.py"
+
+FunctionNames
+1 "<module>"
+2 "<lambda>"
+
+FileLocations
+1 {file_name_id=1 function_name_id=1 line=6 end_line=6 column=36 end_column=52}
+2 {file_name_id=1 function_name_id=2 line=5 end_line=5 column=26 end_column=92}
+
+StackFrames
+1 {file_location_id=1 parent_frame_id=1}
+2 {file_location_id=2 parent_frame_id=2}
+
+
+ENTRY %main.1 (q.1: bf16[2,2048,12,64], k.1: bf16[2,2048,12,64], v.1: bf16[2,2048,12,64]) -> bf16[2,2048,12,64] {
+  %v.1 = bf16[2,2048,12,64]{3,2,1,0} parameter(2), metadata={op_name="v"}
+  %k.1 = bf16[2,2048,12,64]{3,2,1,0} parameter(1), metadata={op_name="k"}
+  %q.1 = bf16[2,2048,12,64]{3,2,1,0} parameter(0), metadata={op_name="q"}
+  %dot_product_attention_fwd.4 = (bf16[2,12,2048,64]{3,1,2,0}, u8[0]{0}) custom-call(%q.1, %k.1, %v.1), custom_call_target="__cudnn$fmhaSoftmax", operand_layout_constraints={bf16[2,2048,12,64]{3,2,1,0}, bf16[2,2048,12,64]{3,2,1,0}, bf16[2,2048,12,64]{3,2,1,0}}, api_version=API_VERSION_STATUS_RETURNING, metadata={op_name="jit(<lambda>)/dot_product_attention_fwd" stack_frame_id=2}, backend_config={"cudnn_fmha_backend_config":{"algorithm":{"algo_id":"0","is_cudnn_frontend":true,"math_type":"TENSOR_OP_MATH","tuning_knobs":{"17":"1","24":"0"},"workspace_size":"0"},"bmm1_dot_dimension_numbers":{"lhs_batch_dimensions":["0","2"],"lhs_contracting_dimensions":["3"],"rhs_batch_dimensions":["0","2"],"rhs_contracting_dimensions":["3"]},"bmm2_dot_dimension_numbers":{"lhs_batch_dimensions":["0","1"],"lhs_contracting_dimensions":["3"],"rhs_batch_dimensions":["0","2"],"rhs_contracting_dimensions":["1"]},"dropout_rate":0.0,"fmha_scale":0.125,"intermediate_tensor_shape":{"dimensions":["2","12","2048","2048"],"element_type":"BF16","is_dynamic_dimension":[false,false,false,false],"layout":{"dim_level_types":[],"dim_ordered":[],"dim_unique":[],"dynamic_shape_metadata_prefix_bytes":"0","element_size_in_bits":"0","index_primitive_type":"PRIMITIVE_TYPE_INVALID","memory_space":"0","minor_to_major":["3","2","1","0"],"pointer_primitive_type":"PRIMITIVE_TYPE_INVALID","tiles":[]},"tuple_shapes":[]},"is_flash_attention":true,"is_paged_attention":false,"mask_type":"CAUSAL","max_seg_per_batch":1,"seed":42,"sliding_window_length":0},"operation_queue_id":"0"}
+  %dot_product_attention_fwd.5.0 = bf16[2,12,2048,64]{3,1,2,0} get-tuple-element(%dot_product_attention_fwd.4), index=0, metadata={op_name="jit(<lambda>)/dot_product_attention_fwd" stack_frame_id=2}
+  ROOT %bitcast.8 = bf16[2,2048,12,64]{3,2,1,0} bitcast(%dot_product_attention_fwd.5.0), metadata={op_name="jit(<lambda>)/dot_product_attention_fwd" stack_frame_id=2}
+}
+

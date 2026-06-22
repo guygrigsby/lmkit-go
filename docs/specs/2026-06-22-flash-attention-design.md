@@ -1,7 +1,8 @@
 # Flash attention for the GoMLX/XLA path
 
-**Status:** design / research. No code yet. This is the justification and the design
-fork; the central question (below) gates which design we actually build.
+**Status:** design. Central question RESOLVED (see below): XLA lowers the cuDNN
+flash custom-calls on this exact stack, so the path is design (a), a Go-only
+implementation in go-xla, no kernel writing.
 
 ## Why this matters (measured)
 
@@ -70,6 +71,34 @@ go-xla's PJRT plugin is the jax-cuda PJRT plugin, so JAX on the same host uses t
 JAX flash attention, dump the StableHLO, and see whether it emits `__cudnn$fmha*` and
 runs on sm_86.
 
+### RESOLVED: yes (measured)
+
+JAX 0.10.2 (the *exact* PJRT plugin version go-xla bundles, `jax-cuda13-pjrt_0.10.2`)
+with `dot_product_attention(implementation="cudnn")` on the 3070 Ti (sm_86, cuDNN
+9.23, CUDA 13):
+
+- Forward emits `__cudnn$fmhaSoftmax` and **runs**.
+- Backward emits `__cudnn$fmhaSoftmax` + `__cudnn$fmhaSoftmaxBackward` and **runs**.
+
+So the lowering is alive; only the auto-rewrite was removed. Design (a) it is.
+
+The exact custom_call spec (full HLO in `reference/fmha_fwd.hlo`, `fmha_bwd.hlo`):
+
+- **Targets:** `__cudnn$fmhaSoftmax` (fwd), `__cudnn$fmhaSoftmaxBackward` (bwd).
+- **Layouts:** inputs q,k,v are `bf16[B,S,H,D]` (BSHD). Forward output is
+  `bf16[B,H,S,D]` plus a `u8[0]` workspace; backward output is dQ,dK,dV
+  (`bf16[B,H,S,D]`) plus a ~25MB `u8` workspace.
+- **Backward operands:** q, k, v, forward-output, dO, and the softmax stats
+  `f32[B,H,S]` (the per-row logsumexp the forward must also return for the backward
+  to recompute, this is the flash residual).
+- **api_version:** `API_VERSION_STATUS_RETURNING`.
+- **backend_config** (`cudnn_fmha_backend_config`): the bmm1/bmm2 dot dimension
+  numbers (Q·Kᵀ then P·V, batch over B,H, contract over D), `fmha_scale` = 1/sqrt(D)
+  = 0.125, `mask_type` = CAUSAL, `is_flash_attention` = true, `dropout_rate` 0,
+  `algorithm.is_cudnn_frontend` true / `math_type` TENSOR_OP_MATH, plus the four
+  grad-gemm dimension numbers on the backward. This is a serialized proto XLA already
+  defines (`CudnnfMHABackendConfig`), so go-xla constructs it, no new C ABI.
+
 ## Two designs, picked by the answer
 
 - **(a) XLA still lowers the custom_call.** Then flash is Go-only, no kernel writing:
@@ -93,11 +122,26 @@ gomlx's fused SDPA (`attention.Core`) when the backend implements it; the naive 
 stays as the CPU/SimpleGo fallback and the fp32 parity reference. No new boundary;
 the vendor seam is the gomlx attention op.
 
-## Next step
+## Plan (design a)
 
-Answer the central question empirically: install / locate JAX against the go-xla PJRT
-plugin on a CUDA host (sm_86), run `jax.nn.dot_product_attention(implementation=
-"cudnn")` forward and backward, dump the StableHLO and the optimized HLO, and confirm
-(1) it emits a `__cudnn$fmha*` custom_call, (2) it compiles and runs on sm_86, (3) the
-exact target name, operand layout, and `backend_config`. That confirms design (a) and
-hands us the precise custom_call spec go-xla must emit.
+1. **go-xla `stablehlo`:** add a `CustomCall` emitter (the op is already in
+   go-xla's optype enum, just not exposed in the builder), able to set target,
+   operands, tuple result shapes, `operand_layout_constraints`, `api_version`, and a
+   `backend_config`.
+2. **go-xla `compute/xla`:** implement `FusedScaledDotProductAttention` to emit
+   `__cudnn$fmhaSoftmax` with the `CudnnfMHABackendConfig` (scale, causal, dot
+   dimension numbers from the spec above), returning output + softmax-stats; and its
+   VJP via `__cudnn$fmhaSoftmaxBackward`. Replaces the current `ErrNotImplemented`.
+3. **gomlx:** `attention.Core` already routes to the backend fused op via
+   `InternalFusedOpCaller` with a decomposed fallback, so it starts using cuDNN flash
+   on CUDA once the backend implements it; SimpleGo/CPU keeps the decomposed path.
+4. **lmkit-go:** `model.Attention` calls gomlx's fused SDPA instead of the manual
+   einsum-softmax-einsum; the naive path stays as the fp32 parity reference and the
+   CPU fallback. Validate parity (fp32) and re-measure throughput at 2048 on the 8GB
+   GPU; expect the ~100x to mostly close and the memory wall to vanish (no T^2 held).
+
+Steps 1-2 are the bulk and live in go-xla (jan's territory; he invited us to take a
+stab). Verifying each step against the JAX reference HLO in `reference/` keeps it
+honest. Open risks: GQA (numKVHeads != numHeads) may need the head-repeat before the
+call or a config flag; bf16-only on the fast path; the softmax-stats residual must be
+threaded from forward to backward.
