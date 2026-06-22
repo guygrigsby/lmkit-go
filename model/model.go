@@ -31,41 +31,22 @@ func Forward(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
 // the backward pass instead of being held, so only one layer's [B,T,*] attention
 // activations are live at a time. Trades one extra forward per layer for a large
 // drop in training peak memory. Numerically identical to Forward; only
-// memory/compute differ. Inference (no gradient) is unaffected: the recompute copy
-// is dead-code-eliminated.
+// memory/compute differ.
 //
-// Mechanism: g.InternalFusedOpCaller(fwd, recompute) returns fwd's value for the
-// forward but routes the backward VJP through the separately-built recompute copy
-// (gomlx rev_autodiff vjpAlternateOutputs), so fwd's internals are not needed in
-// the backward. The recompute copy reads its inputs through g.OptimizationBarrier
-// so XLA cannot common-subexpression-eliminate it back into the forward copy (which
-// would defeat the remat); with the copies kept distinct, XLA frees the forward
-// layer's activations after its output and recomputes them only in the backward.
+// Uses gomlx's Node.Checkpoint() (gomlx #425): marking each layer's input as a
+// checkpoint makes autodiff rematerialize that layer in the backward pass, with
+// the optimization + scheduling barriers inserted for it. StopCheckpoint caps the
+// rematerialization before the final norm and logits.
 func ForwardCheckpointed(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
 	if len(w.Layers) != cfg.NLayers {
 		panic(fmt.Sprintf("model.ForwardCheckpointed: weights have %d layers, config NLayers=%d", len(w.Layers), cfg.NLayers))
 	}
 	h := EmbedLookup(w.Embed, tokenIDs)
 	for i := range w.Layers {
-		lw := w.Layers[i]
-		hin := h
-		// Barrier the FORWARD copy's inputs (not the recompute copy's): in
-		// InternalFusedOpCaller the fused/forward side is never differentiated (its
-		// VJP is redirected to the decomposed/recompute side), so the barrier needs
-		// no gradient, which the upstream OptimizationBarrier op does not define. It
-		// still keeps the two copies distinct so XLA won't CSE them, and the recompute
-		// reads raw inputs so gradients flow straight back.
-		fwdFn := func() *g.Node {
-			b := g.OptimizationBarriers(hin, lw.AttnNorm, lw.Wq, lw.Wk, lw.Wv, lw.Wo, lw.FFNNorm, lw.Wgate, lw.Wup, lw.Wdown)
-			blw := LayerWeights{
-				AttnNorm: b[1], Wq: b[2], Wk: b[3], Wv: b[4], Wo: b[5],
-				FFNNorm: b[6], Wgate: b[7], Wup: b[8], Wdown: b[9],
-			}
-			return DecoderLayer(cfg, b[0], blw, positions)
-		}
-		recomputeFn := func() *g.Node { return DecoderLayer(cfg, hin, lw, positions) }
-		h = g.InternalFusedOpCaller(fwdFn, recomputeFn)
+		h = h.Checkpoint() // recompute this layer in the backward instead of storing it
+		h = DecoderLayer(cfg, h, w.Layers[i], positions)
 	}
+	h = h.StopCheckpoint()
 	h = RMSNorm(h, w.FinalNorm, float32(cfg.RMSEps))
 	return TiedLogits(h, w.Embed)
 }
