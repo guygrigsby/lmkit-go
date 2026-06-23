@@ -34,15 +34,6 @@ func modelLoss(scope *model.Scope, gr *g.Graph, mcfg lmodel.Config, x, y *g.Node
 	}
 	logits := fwd(mcfg, w, x, positions)            // computeDT on CUDA
 	logits = g.ConvertDType(logits, dtypes.Float32) // loss in fp32
-	// Barrier the loss gradient (dLogits) so the backward dH = dLogits·table and
-	// dTable = hᵀ·dLogits lower as clean gemms. Without it XLA fuses the softmax
-	// backward with the V=vocab contraction and materializes a [128,H,B,T] f32
-	// partial-sum buffer (~1.5 GB at lm-100m), which pins the micro-batch at B=2.
-	// Mathematically identity (barrier is identity, fwd and on the gradient); only
-	// changes XLA's fusion choice.
-	logits = g.IdentityWithCustomGradient(logits, func(_, v *g.Node) *g.Node {
-		return g.OptimizationBarrier(v)
-	})
 	return loss.SparseCategoricalCrossEntropyLogits([]*g.Node{y}, []*g.Node{logits})
 }
 
