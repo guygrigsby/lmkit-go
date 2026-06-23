@@ -1,6 +1,8 @@
 # lm-100m-en baseline
 
-~100M parameter Llama (GQA, bfloat16) trained on English text. Val loss target: 1.7337.
+~100M parameter Llama (GQA, bfloat16) trained on English text, to a Chinchilla token budget.
+The original pretraining corpus is no longer available, so the baseline is re-established on a
+freshly assembled English corpus rather than the original run's exact validation loss.
 
 ## Architecture
 
@@ -42,7 +44,8 @@ Progress is written to `./out/lm-100m-en/metrics.jsonl`, one JSON object per lin
 - `train` — per-step metrics (loss, lr, grad_norm, tok_per_sec, peak_vram_gb, ...)
 - `done` — training complete
 
-Target: val loss descending toward **1.7337** over ~200k steps.
+Target: val loss descending steadily over the run, toward a tiny-Llama baseline at the
+Chinchilla token budget on the freshly assembled corpus.
 
 ## On-demand integration test
 

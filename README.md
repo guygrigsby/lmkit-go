@@ -17,10 +17,13 @@ that keeps doing the real research training. This is a parallel, community-facin
 
 ## Status
 
-Working end to end. The from-scratch Llama is parity-tested against PyTorch goldens,
-the training loop trains, and the target is reproducing a published tiny-Llama
-baseline (`Aeryx-ai/lm-100m-en-overtrained`, val loss 1.7337) in pure Go-on-XLA.
-See [`examples/lm-100m-en`](./examples/lm-100m-en).
+Working end to end: the from-scratch Llama is parity-tested against PyTorch goldens,
+and the training loop trains (resume, eval, checkpoint, metrics). The reproduction
+target is the ~100M `Aeryx-ai/lm-100m-en` Llama trained to a Chinchilla token budget,
+in pure Go-on-XLA. The original pretraining corpus is no longer available, so the
+baseline is being re-established on a freshly assembled English corpus rather than
+chasing the original run's exact validation loss. See
+[`examples/lm-100m-en`](./examples/lm-100m-en).
 
 ## The stack
 
