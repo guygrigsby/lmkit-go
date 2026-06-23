@@ -13,7 +13,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: lmkit <quickstart|train> ...")
+		fmt.Fprintln(os.Stderr, "usage: lmkit <quickstart|train|shard> ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -24,8 +24,10 @@ func main() {
 		}
 	case "train":
 		os.Exit(trainCmd(os.Args[2:]))
+	case "shard":
+		os.Exit(shardCmd(os.Args[2:]))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: lmkit <quickstart|train> ...")
+		fmt.Fprintln(os.Stderr, "usage: lmkit <quickstart|train|shard> ...")
 		os.Exit(2)
 	}
 }

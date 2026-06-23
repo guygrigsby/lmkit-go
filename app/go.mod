@@ -6,11 +6,13 @@ require (
 	github.com/guygrigsby/lmkit-go/backend v0.0.0-00010101000000-000000000000
 	github.com/guygrigsby/lmkit-go/data v0.0.0-00010101000000-000000000000
 	github.com/guygrigsby/lmkit-go/model v0.0.0-00010101000000-000000000000
+	github.com/guygrigsby/lmkit-go/tokenizer v0.0.0-00010101000000-000000000000
 	github.com/guygrigsby/lmkit-go/train v0.0.0-00010101000000-000000000000
 )
 
 require (
 	github.com/NVIDIA/go-nvml v0.13.2-0 // indirect
+	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
@@ -30,5 +32,6 @@ replace (
 	github.com/guygrigsby/lmkit-go/backend => ../backend
 	github.com/guygrigsby/lmkit-go/data => ../data
 	github.com/guygrigsby/lmkit-go/model => ../model
+	github.com/guygrigsby/lmkit-go/tokenizer => ../tokenizer
 	github.com/guygrigsby/lmkit-go/train => ../train
 )
