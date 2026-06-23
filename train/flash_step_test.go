@@ -2,6 +2,7 @@ package train_test
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,14 @@ func TestFlashFullStep2048(t *testing.T) {
 	store.RootScope().SetParam(model.ParamInitialSeed, int64(1337))
 	opt := optimizer.Adam().LearningRate(1e-3).Done()
 
+	ga := 1 // gradient-accumulation micro-batches per optimizer step; real lm-100m config is 32.
+	if v := os.Getenv("GOMLX_GA"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ga = n
+		}
+	}
+	ckpt := os.Getenv("GOMLX_CKPT") == "true" // per-layer gradient checkpointing (real config: on)
+
 	var per time.Duration
 	fit := func() (ok bool) {
 		defer func() {
@@ -59,7 +68,7 @@ func TestFlashFullStep2048(t *testing.T) {
 				ok = false
 			}
 		}()
-		s := train.NewStepper(bk, store, cfg, positions, 1, 1.0, 0.0, opt, dtypes.BFloat16, false)
+		s := train.NewStepper(bk, store, cfg, positions, ga, 1.0, 0.0, opt, dtypes.BFloat16, ckpt)
 		s.Step(batch) // compile + warmup
 		const iters = 5
 		start := time.Now()
@@ -71,7 +80,9 @@ func TestFlashFullStep2048(t *testing.T) {
 	}()
 
 	if fit {
-		t.Logf("lm-100m step (fwd+bwd+opt) B=%d T=%d flash=%v: %v", B, T, lmodel.UseFlashAttention, per)
+		tokPerSec := float64(ga*B*T) / per.Seconds()
+		t.Logf("lm-100m step B=%d T=%d ga=%d flash=%v ckpt=%v: %v/step, %.0f tok/s (%d tokens/step)",
+			B, T, ga, lmodel.UseFlashAttention, ckpt, per, tokPerSec, ga*B*T)
 	} else {
 		t.Fatalf("lm-100m step (B=%d T=%d flash=%v) did NOT fit on this GPU", B, T, lmodel.UseFlashAttention)
 	}
