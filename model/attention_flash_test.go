@@ -87,8 +87,11 @@ func TestAttentionFlashGradMatchesDecomposed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backend: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(be.Compute().Name()), "cuda") {
-		t.Logf("WARNING: backend %q is not cuda; flash falls back to decomposed so this parity is trivial", be.Compute().Name())
+	// cuda lives in Description(), not Name() (which is the backend family, "xla"); off cuda,
+	// flash falls back to decomposed and this parity is trivial, so say so loudly.
+	dev := strings.ToLower(be.Compute().Name() + " " + be.Compute().Description())
+	if !strings.Contains(dev, "cuda") {
+		t.Logf("WARNING: backend %q is not cuda; flash falls back to decomposed so this parity is trivial", dev)
 	}
 	cfg := model.Config{Hidden: 256, NHeads: 4, NKVHeads: 2, HeadDim: 64, RopeBase: 10000}
 	const B, T = 2, 128
