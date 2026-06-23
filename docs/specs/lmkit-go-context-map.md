@@ -120,7 +120,7 @@ where they're mature (e.g. `edsrzf/mmap-go`); everything central is owned.
 
 ## Build order
 
-Dependency-driven critical path to the north star (reproduce val loss 1.7337):
+Dependency-driven critical path to the north star (reproduce the Chinchilla-budget baseline):
 
 ```
 backend ──► model ──► train (overfit-a-batch, synthetic data)

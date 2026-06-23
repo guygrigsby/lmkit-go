@@ -112,7 +112,7 @@ transformers' 400 architectures, the hub infra) is 🚫.
 | **Generation** (greedy/beam/sampling, temp/top-k/top-p/min-p, logits processors, constrained/grammar, streaming, KV cache classes) | full `generate` | ⬜ **gap (post-repro)** — autoregressive sampling + **KV cache**; the rest (beam, grammar, the processor zoo) optional |
 | Serving (vLLM, SGLang, TGI, TensorRT-LLM, paged/radix attn, continuous batching, speculative decoding, P/D, multi-LoRA) | the whole serving industry | 🚫 not a serving stack. (Trained weights export to GGUF → llama.cpp/ollama for serving) |
 | PEFT (LoRA/QLoRA/DoRA + ~45 tuners) & RLHF (TRL: SFT/DPO/GRPO/PPO/reward) | huge | 🚫 mostly out of scope; 🟡 a basic **SFT** loop is plausible later (lmkit has one); the PEFT/RLHF zoo is not a goal |
-| Evaluation (lm-eval-harness, lighteval, MTEB, perplexity, LLM-judge, MMLU-Pro/GPQA/SWE-bench/…) | the whole eval ecosystem | ⬜ **val-loss / perplexity** eval is the in-scope piece (it's how we hit 1.7337); 🚫 the benchmark + judge ecosystem |
+| Evaluation (lm-eval-harness, lighteval, MTEB, perplexity, LLM-judge, MMLU-Pro/GPQA/SWE-bench/…) | the whole eval ecosystem | ⬜ **val-loss / perplexity** eval is the in-scope piece (it's how we hit the baseline); 🚫 the benchmark + judge ecosystem |
 
 **Read:** generation+KV-cache is a real post-reproduction ⬜; **val-loss/perplexity
 eval** is in-scope (the reproduction metric). Serving, the PEFT/RLHF zoo, and the
@@ -140,7 +140,7 @@ subsystems**, much of it kernel-deep or whole products. Mapped to lmkit-go:
   2. **Tokenizer** — load the 32k byte-level BPE, encode/decode (+ later: train). *(next)*
   3. **DataLoader** — mmap shard loader → blocks. *(next)*
   4. **IO** — safetensors r/w, GGUF export, HF push. *(later milestone)*
-  5. **Eval + generation** — val-loss/perplexity (the 1.7337 metric) + sampling/KV
+  5. **Eval + generation** — val-loss/perplexity (the baseline metric) + sampling/KV
      cache. *(reproduction + post-repro)*
   6. **CLI** — `shard`/`train`/`eval` subcommands. *(ergonomics)*
 

@@ -80,5 +80,5 @@ flowchart TB
 Mechanics mirror `lmkit.pretrain` + `lmkit.training` exactly; the loop is
 hand-rolled (Go `for` + a compiled step graph) so eval/checkpoint/metrics/per-step
 LR interleave and the global-norm clip (which GoMLX lacks) can be injected before
-the AdamW step. The full lm-100m run is durable/resumable; the val curve toward
-**1.7337** lands over days on a CUDA GPU host (bf16 CUDA).
+the AdamW step. The full lm-100m run is durable/resumable; the val curve toward a
+Chinchilla-budget baseline lands over days on a CUDA GPU host (bf16 CUDA).

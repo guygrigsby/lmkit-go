@@ -17,7 +17,7 @@ the mid-2026 Go-vs-Python ecosystem research.
 
 ---
 
-## A. Critical path to the lm-100m-en reproduction (val loss 1.7337)
+## A. Critical path to the lm-100m-en reproduction (Chinchilla-budget baseline)
 These gate the replica train. lm-100m-en config values in parens.
 
 - ⬜ **DataLoader** — mmap `uint16` shards → `(x,y)` block batches (`block_size=2048`).
@@ -37,7 +37,7 @@ These gate the replica train. lm-100m-en config values in parens.
 - ⬜ **bf16 training** (`dtype=bfloat16`) — train in bf16 with fp32-internal norms
   (the model already does fp32 norm accumulation). Validate numerics vs fp32.
 - ⬜ **Periodic eval** (`eval_interval=2000`, `eval_iters=100`) — val loss over the
-  held-out `val_*.bin` shard; this is what's compared to 1.7337.
+  held-out `val_*.bin` shard; this is the val-loss signal compared against the baseline.
 - ⬜ **Checkpointing + resume** — rolling `latest` (`save_interval=200`), permanent
   snapshots (`snapshot_interval=25000`, `keep_last_snapshots=3`), resume from
   latest. GoMLX `ml/model/checkpoint` saves all variables (incl. optimizer state)
@@ -50,7 +50,7 @@ These gate the replica train. lm-100m-en config values in parens.
   M4's `Overfit` is the seed; this is the production loop.
 - ⬜ **TrainConfig + config loading** — a Go `TrainConfig` mirroring the dataclass
   (lr/schedule/batch/intervals/optimizer/seed/dtype); load from file.
-- ⬜ **Run on the GPU host** — the actual long run toward the 1.7337 val curve (single
+- ⬜ **Run on the GPU host** — the actual long run toward the Chinchilla-budget val curve (single
   CUDA GPU ~8GB, bf16, ~days). Durable/resumable per the WSD config.
 
 ## B. Tokenizer (lmkit/tokenizer.py, lmkit/shard.py)

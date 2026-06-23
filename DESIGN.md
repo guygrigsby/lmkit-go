@@ -49,14 +49,14 @@ the *ergonomic Go layer is the novel, unfilled contribution*.)
 
 ## North-star artifact (the first real milestone)
 
-Reproduce a **published** tiny-Llama baseline in pure Go-on-XLA:
+Reproduce a tiny-Llama baseline in pure Go-on-XLA:
 
-- Target: `Aeryx-ai/lm-100m-en-overtrained` — a ~100M-param vanilla Llama,
-  English-only, fresh 32k BPE, ~11.3B-token corpus, **overtrained val loss
-  1.7337**. (Built by the Python stack; see the `lm-100m-en` project in the
-  `training` monorepo for the exact `config.py`, corpus recipe `data.py`, and
-  tokenizer.)
-- Success = a gotrain run reproduces that loss curve (within noise) on the same
+- Target: the ~100M `Aeryx-ai/lm-100m-en` vanilla Llama (English-only, fresh 32k
+  BPE, GQA), trained to a **Chinchilla token budget**. The original pretraining
+  corpus is no longer available, so the baseline is re-established on a freshly
+  assembled English corpus rather than the original run's exact validation loss.
+  (Architecture/config/tokenizer recipe from the Python stack's `lm-100m-en` project.)
+- Success = a from-scratch Go-on-XLA run reproduces a comparable val curve on that
   corpus + tokenizer + config.
 
 Why this target: tiny enough to train cheaply, fully specified, and we already
@@ -109,10 +109,10 @@ Prove correctness with tests, numerically, before claiming it works:
 2. **Model parity:** implement the Llama blocks; pass layer-parity tests vs a
    torch reference; assemble the full model and match a reference forward.
 3. **Loop:** training loop + overfit-a-batch test green.
-4. **Data + tokenizer:** load the lm-100m-en tokenizer; shard the corpus;
-   DataLoader.
-5. **Reproduce:** full training run on the lm-100m-en corpus/config; compare the
-   val curve to 1.7337.
+4. **Data + tokenizer:** load the lm-100m-en tokenizer; shard a freshly assembled
+   corpus; DataLoader.
+5. **Reproduce:** full training run at the lm-100m-en config/tokenizer; compare the
+   val curve to a Chinchilla-budget baseline.
 6. **IO + hub:** safetensors export, push to HF; (optional) GGUF for local
    inference.
 
