@@ -22,3 +22,7 @@ require (
 )
 
 replace github.com/guygrigsby/lmkit-go/backend => ../backend
+
+replace github.com/gomlx/gomlx => github.com/guygrigsby/gomlx v0.27.4-0.20260623205953-79ca17c644ce
+
+replace github.com/gomlx/compute => github.com/guygrigsby/compute v0.0.0-20260623170013-d291a824cc40
