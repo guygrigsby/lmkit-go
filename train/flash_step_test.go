@@ -40,7 +40,12 @@ func TestFlashFullStep2048(t *testing.T) {
 	}
 	lmodel.UseFlashAttention = os.Getenv("GOMLX_STEP_FLASH") != "false"
 
-	const B, T = 2, 2048
+	B, T := 2, 2048 // micro-batch size; GOMLX_B overrides to probe throughput vs underfed-GPU
+	if v := os.Getenv("GOMLX_B"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			B = n
+		}
+	}
 	cfg := lm100mCfg()
 	inputs, labels := fixedBatch(B, T, cfg.VocabSize)
 	batch := func() (*tensors.Tensor, *tensors.Tensor) { return inputs, labels }
