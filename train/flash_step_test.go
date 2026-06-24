@@ -47,6 +47,11 @@ func TestFlashFullStep2048(t *testing.T) {
 		}
 	}
 	cfg := lm100mCfg()
+	if v := os.Getenv("GOMLX_NLAYERS"); v != "" { // probe backward scaling: O(N) vs O(N^2) in depth
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.NLayers = n
+		}
+	}
 	inputs, labels := fixedBatch(B, T, cfg.VocabSize)
 	batch := func() (*tensors.Tensor, *tensors.Tensor) { return inputs, labels }
 	positions := make([]int, T)
