@@ -22,7 +22,8 @@ and the training loop trains (resume, eval, checkpoint, metrics). The reproducti
 target is the ~100M `Aeryx-ai/lm-100m-en` Llama trained to a Chinchilla token budget,
 in pure Go-on-XLA. The original pretraining corpus is no longer available, so the
 baseline is being re-established on a freshly assembled English corpus rather than
-chasing the original run's exact validation loss. See
+chasing the original run's exact validation loss. With cuDNN flash attention on the
+bf16 CUDA path, the 100M trains at sequence length 2048 on an 8 GB card. See
 [`examples/lm-100m-en`](./examples/lm-100m-en).
 
 ## The stack
@@ -34,7 +35,9 @@ on their own ([ADR-0005](./docs/adr/0005-per-package-modules.md)).
   imports the compute stack directly; the boundary is the only seam to the vendor.
 - **`model`**: Llama building blocks: RMSNorm, RoPE, grouped-query attention,
   SwiGLU, tied embeddings. fp32 parity-tested against PyTorch, with an fp32-internal
-  norm/softmax and a bf16 compute path for CUDA.
+  norm/softmax and a bf16 compute path for CUDA. Attention lowers to cuDNN flash
+  (forward and a flash backward, via StableHLO custom-call) on CUDA, with a
+  decomposed fallback everywhere else.
 - **`data`**: memory-mapped uint16 token shards with a prefetching, deterministic
   batch loader.
 - **`tokenizer`**: ByteLevel BPE, loads HuggingFace `tokenizer.json` and round-trips
