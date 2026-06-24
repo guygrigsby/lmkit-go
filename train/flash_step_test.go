@@ -70,6 +70,8 @@ func TestFlashFullStep2048(t *testing.T) {
 		}
 	}
 	ckpt := os.Getenv("GOMLX_CKPT") == "true" // per-layer gradient checkpointing (real config: on)
+	lmodel.SkipAttn = os.Getenv("GOMLX_SKIP_ATTN") == "true"
+	lmodel.SkipFFN = os.Getenv("GOMLX_SKIP_FFN") == "true"
 
 	var per time.Duration
 	fit := func() (ok bool) {
