@@ -1,7 +1,6 @@
 package train
 
 import (
-	"os"
 	"path"
 
 	"github.com/gomlx/compute/dtypes"
@@ -29,16 +28,6 @@ func modelLoss(scope *model.Scope, gr *g.Graph, mcfg lmodel.Config, x, y *g.Node
 	// Per-layer gradient checkpointing recomputes layer activations in the backward
 	// pass instead of holding them — the only way a deep model fits training on a
 	// small GPU. Off for eval (no backward, so nothing to checkpoint).
-	// Profiling ablation: skip the LM head (TiedLogits + cross-entropy) and build a trivial
-	// loss from the hidden states. The backward still flows through embed+layers+norm, so
-	// (full step - this) isolates the LM-head fwd+bwd cost (the 32k-vocab projection + CE).
-	if os.Getenv("GOMLX_NOLMHEAD") == "true" {
-		fh := lmodel.ForwardHidden
-		if checkpoint {
-			fh = lmodel.ForwardHiddenCheckpointed
-		}
-		return g.ReduceAllMean(fh(mcfg, w, x, positions))
-	}
 	fwd := lmodel.Forward
 	if checkpoint {
 		fwd = lmodel.ForwardCheckpointed
