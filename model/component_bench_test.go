@@ -59,6 +59,18 @@ func TestComponentBackwardBench(t *testing.T) {
 		t.Logf("%-14s fwd+bwd: %v", name, time.Since(start)/iters)
 	}
 
+	bench("MatMul3D", func(gr *g.Graph) (*g.Node, []*g.Node) {
+		x, w := bf(gr, 1, B, T, H), bf(gr, 2, H, FFN) // [B,T,H] @ [H,F]
+		return g.MatMul(x, w), []*g.Node{x, w}
+	})
+	bench("MatMul2D", func(gr *g.Graph) (*g.Node, []*g.Node) {
+		x, w := bf(gr, 1, B*T, H), bf(gr, 2, H, FFN) // [B*T,H] @ [H,F]
+		return g.MatMul(x, w), []*g.Node{x, w}
+	})
+	bench("SwiGLU-noSiLU", func(gr *g.Graph) (*g.Node, []*g.Node) {
+		x, wg, wu, wd := bf(gr, 1, B*T, H), bf(gr, 2, H, FFN), bf(gr, 3, H, FFN), bf(gr, 4, FFN, H)
+		return g.MatMul(g.Mul(g.MatMul(x, wg), g.MatMul(x, wu)), wd), []*g.Node{x, wg, wu, wd}
+	})
 	bench("RMSNorm", func(gr *g.Graph) (*g.Node, []*g.Node) {
 		x, s := bf(gr, 1, B, T, H), bf(gr, 2, H)
 		return model.RMSNorm(x, s, 1e-5), []*g.Node{x, s}
