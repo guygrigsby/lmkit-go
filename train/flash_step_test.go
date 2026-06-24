@@ -52,6 +52,11 @@ func TestFlashFullStep2048(t *testing.T) {
 			cfg.NLayers = n
 		}
 	}
+	if v := os.Getenv("GOMLX_FFNHIDDEN"); v != "" { // probe FFN cost: FLOP-bound (scales) vs overhead
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.FFNHidden = n
+		}
+	}
 	inputs, labels := fixedBatch(B, T, cfg.VocabSize)
 	batch := func() (*tensors.Tensor, *tensors.Tensor) { return inputs, labels }
 	positions := make([]int, T)
