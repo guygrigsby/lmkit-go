@@ -73,5 +73,5 @@ on the same GPU.
 - step-0 eval: val_loss 10.556, perplexity 38,410 (random init)
 - early train_loss: step 20 = 10.43 -> step 60 = 8.7; grad_norm healthy, no NaN
 - ETA to Chinchilla floor (~2B tokens / 15k steps): ~18h; then a stable trunk until val plateaus
-- service: lmkit-go-lm100m.service (systemd --user, gputex --gpu 3070ti, auto-resume from latest/, no restart on NaN)
-- metrics: ~/runs/lm-100m-en/out/metrics.jsonl
+- supervision: run under a process supervisor (systemd --user, runit, etc.), auto-resume from `latest/`, no restart on NaN (exit 2)
+- metrics: `<out_dir>/metrics.jsonl`
