@@ -20,8 +20,8 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
 
-replace github.com/gomlx/gomlx => github.com/guygrigsby/gomlx v0.27.4-0.20260624142714-2f1b83e85141
+replace github.com/gomlx/gomlx => github.com/guygrigsby/gomlx v0.27.4-0.20260624230009-7e256ec8e921
 
-replace github.com/gomlx/compute => github.com/guygrigsby/compute v0.0.0-20260623170013-d291a824cc40
+replace github.com/gomlx/compute => github.com/guygrigsby/compute v0.0.0-20260624224439-9ae11d1a1873
 
-replace github.com/gomlx/go-xla => github.com/guygrigsby/go-xla v0.2.3-0.20260622220527-d2d893bf5dbc
+replace github.com/gomlx/go-xla => github.com/guygrigsby/go-xla v0.2.3-0.20260624225036-07cfc7b17b9b

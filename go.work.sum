@@ -7,6 +7,9 @@ github.com/gofrs/uuid v4.4.0+incompatible/go.mod h1:b2aQJv3Z4Fp6yNu3cdSllBxTCLRx
 github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
 github.com/gomlx/bsplines v0.2.0/go.mod h1:9esLFW2B5jekrmvecUjo3JVUmTgEHY6OwEjEQ3zEMiA=
 github.com/gomlx/exceptions v0.0.3/go.mod h1:uHL0TQwJ0xaV2/snJOJV6hSE4yRmhhfymuYgNredGxU=
+github.com/guygrigsby/compute v0.0.0-20260624224439-9ae11d1a1873/go.mod h1:MDTT683Wvq7IMSKXDGLvV3Co7HDpx/Xsgp2RbF5lhNM=
+github.com/guygrigsby/go-xla v0.2.3-0.20260624225036-07cfc7b17b9b/go.mod h1:U53xQ6FasicRXLpdEywW8Yrx8GTprcrGsFq7SiI4bvY=
+github.com/guygrigsby/gomlx v0.27.4-0.20260624230009-7e256ec8e921/go.mod h1:WzJZqyB89UnhNSdfjuZ8GWWACofCyjSq0tpDlQCVkWE=
 github.com/janpfeifer/gonb v0.11.3/go.mod h1:2A4CHF6ry+Ql47bjW4VFpinXiW23AELCOuBzB1BZgQY=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
