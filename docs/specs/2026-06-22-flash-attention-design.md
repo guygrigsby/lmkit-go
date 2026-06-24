@@ -145,3 +145,49 @@ stab). Verifying each step against the JAX reference HLO in `reference/` keeps i
 honest. Open risks: GQA (numKVHeads != numHeads) may need the head-repeat before the
 call or a config flag; bf16-only on the fast path; the softmax-stats residual must be
 threaded from forward to backward.
+
+## Outcome (measured, 2026-06-23)
+
+Design (a) shipped and works, but the throughput model above was wrong about where
+the gap lives. Record:
+
+**Built and verified.** The three-layer custom-call path is implemented across the
+forks and PR'd: `attention.FlashAttention` (gomlx, PR #427), `compute.CustomCallSpec`
++ Go backend (compute, PR #13), and `Function.CustomCall` that lowers to the StableHLO
+`custom_call` (go-xla, PR #37). lmkit-go pins all three via `replace` (commits 350b408,
+4872014). **Critical gotcha:** without the go-xla pin, `FlashAttention` catches
+`ErrNotImplemented` in a `TryCatch` and *silently* falls back to naive fp32 attention
+(materialized `[B,H,T,T]` scores) — it compiles and runs green but flash is a no-op.
+Verify engagement by grepping the *optimized* HLO for `__cudnn$fmhaSoftmax`; 0 hits =
+silent fallback. With all three pinned: optimized HLO shows `__cudnn$fmhaSoftmax` +
+`__cudnn$fmhaSoftmaxBackward`, the fp32 score buffers are gone, and parity (fwd +
+dQ/dK/dV) matches the decomposed reference to ~0.2-0.4% rel error on sm_86 (within bf16
+tolerance). PR #427's own cuda parity tests pass.
+
+**The "~100x is one missing kernel" thesis was wrong.** Flash took the lm-100m step
+(B=2, T=2048, ga=1, ckpt=true) from ~875 to ~1237 tok/s — about **1.4x**, not the
+10-20x the breakdown above attributed to attention. The remaining gap to the PyTorch
+reference (~32k tok/s) is still ~26x, and it is NOT attention, memory, or batch:
+
+- **B=2 is the reference's own config.** PyTorch hits 32k tok/s *at* B=2, and B=4 OOMs
+  in PyTorch too (per `lmkit.toml`). So the micro-batch was never the bottleneck.
+- The ~26x residual is **per-token kernel efficiency at fixed B=2** — the "general
+  fusion gap" this doc estimated at 2-3x is actually the dominant factor. At 100% GPU
+  util we sustain ~1 TFLOP/s vs PyTorch's ~19-35; the step is ~1300 small
+  XLA kernels (norms, RoPE, SwiGLU, residuals, fp32<->bf16 converts, the 32k-vocab
+  LM-head) where PyTorch runs far fewer, fatter kernels.
+
+**Memory work that did NOT help (negative results, all reverted).** The LM-head
+backward (`dH = dLogits @ table`, K=V=32000) lowers as an XLA split-K gemm that
+materializes a ~1.5 GB `[128,768,B*T]` partial-sum buffer, the ceiling that pins B=2.
+Three attempts to remove it: (1) an `OptimizationBarrier` on `dLogits` — barrier VJP is
+pass-through, did not redirect the lowering, regressed to 704 tok/s; (2) `TiedLogits`
+as an explicit 2-D matmul — still split-K (just reshaped), regressed B=2 to OOM;
+(3) chunked online-softmax cross-entropy (`TiedLogitsCrossEntropyChunked`) — numerically
+exact (parity + overfit pass) and it *did* eliminate the split-K buffer, but the unrolled
+chunks' activations replaced it one-for-one (no net memory win) and it regressed to 560
+tok/s. All reverted: unpinning B=2 was the wrong goal, and this mirrors the chunked-
+attention lesson above (online-softmax as HLO ops does not produce a kernel win).
+
+**Next:** per-kernel profiling at B=2 (nsys/CUPTI or XLA's profiler trace) to locate the
+26x by actual kernel time, instead of inferring from buffer sizes and kernel counts.
