@@ -10,16 +10,21 @@ import (
 	"github.com/gomlx/gomlx/ml/model"
 	"github.com/gomlx/gomlx/ml/model/initializer"
 	gomlxtrain "github.com/gomlx/gomlx/ml/train"
-	"github.com/gomlx/gomlx/ml/train/loss"
 	"github.com/gomlx/gomlx/ml/train/optimizer"
 
 	gomlxbackend "github.com/guygrigsby/lmkit-go/backend/gomlx"
 	lmodel "github.com/guygrigsby/lmkit-go/model"
 )
 
+// lmHeadVocabChunk is the vocab block size for the chunked cross-entropy. It bounds the
+// contracted dimension of the LM-head backward so XLA does not build a split-K partial-sum
+// buffer over the whole vocabulary (~1.5 GB at lm-100m, which pinned the micro-batch at B=2).
+const lmHeadVocabChunk = 4096
+
 // modelLoss builds the fp32 next-token CE loss for one micro-batch. Variables are
-// fp32 (master); on CUDA the weights are cast to computeDT (bf16) for the matmuls,
-// logits upcast to fp32 for the loss.
+// fp32 (master); on CUDA the weights are cast to computeDT (bf16) for the matmuls. The loss
+// is built from the hidden states and the tied table via chunked cross-entropy, so the full
+// [B,T,V] logits and their split-K backward never materialize; softmax math stays fp32.
 func modelLoss(scope *model.Scope, gr *g.Graph, mcfg lmodel.Config, x, y *g.Node, computeDT dtypes.DType, positions []int, checkpoint bool) *g.Node {
 	w := ModelVars(scope, gr, mcfg) // fp32 vars
 	if computeDT != dtypes.Float32 {
@@ -28,13 +33,12 @@ func modelLoss(scope *model.Scope, gr *g.Graph, mcfg lmodel.Config, x, y *g.Node
 	// Per-layer gradient checkpointing recomputes layer activations in the backward
 	// pass instead of holding them — the only way a deep model fits training on a
 	// small GPU. Off for eval (no backward, so nothing to checkpoint).
-	fwd := lmodel.Forward
+	fwdHidden := lmodel.ForwardHidden
 	if checkpoint {
-		fwd = lmodel.ForwardCheckpointed
+		fwdHidden = lmodel.ForwardHiddenCheckpointed
 	}
-	logits := fwd(mcfg, w, x, positions)            // computeDT on CUDA
-	logits = g.ConvertDType(logits, dtypes.Float32) // loss in fp32
-	return loss.SparseCategoricalCrossEntropyLogits([]*g.Node{y}, []*g.Node{logits})
+	h := fwdHidden(mcfg, w, x, positions) // [B,T,H], computeDT on CUDA
+	return lmodel.TiedLogitsCrossEntropyChunked(h, w.Embed, y, lmHeadVocabChunk)
 }
 
 // castWeights returns a copy of w with every weight node cast to dt (for bf16 compute).

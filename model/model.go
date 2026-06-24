@@ -15,15 +15,23 @@ import (
 // config is corrupt (e.g. a partial checkpoint load), and silently running a
 // shallower/deeper model would produce wrong results with no error.
 func Forward(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
+	return TiedLogits(ForwardHidden(cfg, w, tokenIDs, positions), w.Embed) // [B,T,V]
+}
+
+// ForwardHidden runs the decoder up to (and including) the final RMSNorm, returning the
+// hidden states h [B,T,H] BEFORE the tied output projection. Training builds the loss
+// straight from h and the embedding table (chunked cross-entropy) so the full [B,T,V]
+// logits and their split-K backward never materialize; inference uses Forward, which
+// applies TiedLogits to this.
+func ForwardHidden(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
 	if len(w.Layers) != cfg.NLayers {
-		panic(fmt.Sprintf("model.Forward: weights have %d layers, config NLayers=%d", len(w.Layers), cfg.NLayers))
+		panic(fmt.Sprintf("model.ForwardHidden: weights have %d layers, config NLayers=%d", len(w.Layers), cfg.NLayers))
 	}
 	h := EmbedLookup(w.Embed, tokenIDs) // [B,T,H]
 	for i := range w.Layers {
 		h = DecoderLayer(cfg, h, w.Layers[i], positions)
 	}
-	h = RMSNorm(h, w.FinalNorm, float32(cfg.RMSEps))
-	return TiedLogits(h, w.Embed) // [B,T,V]
+	return RMSNorm(h, w.FinalNorm, float32(cfg.RMSEps))
 }
 
 // ForwardCheckpointed is Forward with per-layer gradient checkpointing
@@ -38,8 +46,14 @@ func Forward(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
 // the optimization + scheduling barriers inserted for it. StopCheckpoint caps the
 // rematerialization before the final norm and logits.
 func ForwardCheckpointed(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
+	return TiedLogits(ForwardHiddenCheckpointed(cfg, w, tokenIDs, positions), w.Embed)
+}
+
+// ForwardHiddenCheckpointed is ForwardHidden with per-layer gradient checkpointing.
+// See ForwardHidden and ForwardCheckpointed.
+func ForwardHiddenCheckpointed(cfg Config, w Weights, tokenIDs *g.Node, positions []int) *g.Node {
 	if len(w.Layers) != cfg.NLayers {
-		panic(fmt.Sprintf("model.ForwardCheckpointed: weights have %d layers, config NLayers=%d", len(w.Layers), cfg.NLayers))
+		panic(fmt.Sprintf("model.ForwardHiddenCheckpointed: weights have %d layers, config NLayers=%d", len(w.Layers), cfg.NLayers))
 	}
 	h := EmbedLookup(w.Embed, tokenIDs)
 	for i := range w.Layers {
@@ -47,6 +61,5 @@ func ForwardCheckpointed(cfg Config, w Weights, tokenIDs *g.Node, positions []in
 		h = DecoderLayer(cfg, h, w.Layers[i], positions)
 	}
 	h = h.StopCheckpoint()
-	h = RMSNorm(h, w.FinalNorm, float32(cfg.RMSEps))
-	return TiedLogits(h, w.Embed)
+	return RMSNorm(h, w.FinalNorm, float32(cfg.RMSEps))
 }
