@@ -80,15 +80,25 @@ machinery) is inherited or not-our-product.
 
 | Area | PyTorch / ecosystem | lmkit-go |
 |---|---|---|
-| SDPA + **FlashAttention 2/3/4**, xFormers, FlexAttention, paged attn | hand-written CUDA/Triton/CuTe | 🧊 **FlashAttention as an XLA op-graph** (ADR-0004); ⚙️ XLA-GPU may fuse to cuDNN flash. Today: explicit `softmax(QKᵀ/√d)V`, O(seq²) mem (fine at 100M) |
+| SDPA + **FlashAttention 2/3/4**, xFormers, FlexAttention, paged attn | hand-written CUDA/Triton/CuTe | ✅ **cuDNN flash** via an explicit `__cudnn$fmha` custom-call (gomlx/compute/go-xla forks, 2026-06-23), parity-verified on sm_86 — the *same* kernel PyTorch's SDPA uses. Earned ~1.4x; the residual ~26x gap to PyTorch is NOT attention (it's broad — see Read below) |
 | GQA/MQA/sliding-window/ALiBi/sink | kernel configs | ✅ GQA (built); ⬜ others if a model needs them |
 | Kernel authoring (Triton, CUTLASS, CuTe, custom CUDA, Liger fused CE/RMSNorm/SwiGLU) | the kernel world | 🚫/🧊 we **ride XLA**; hand-written kernels deferred unless profiling forces it (ADR-0004). XLA's escape hatch (analogous to Pallas) is the someday-option |
 | Quantization (torchao, bitsandbytes, GPTQ, AWQ, FP8/FP4, KV-cache quant, QAT) | enormous, kernel-heavy | 🚫 out of scope (post-training, kernel-bound); maybe GGUF *export* later for inference interop |
 | Memory (activation/grad checkpointing, CPU/NVMe offload, flash-decoding, fused/chunked loss) | full | ⚙️ XLA rematerialization ≈ recompute; 🚫 offload/flash-decoding stacks |
 
 **Read:** almost entirely ⚙️ (XLA gives fusion) / 🚫 (kernel + quantization world)
-/ 🧊 (ADR-0004 deferrals). The only "ours" item is FlashAttention-as-an-XLA-graph,
-a deliberate later perf milestone — not needed for a 100M model.
+/ 🧊 (ADR-0004 deferrals).
+
+**Measured 2026-06-23 — the "ride XLA" bet has a real cost at this scale.** Flash is
+now done (same cuDNN kernel as PyTorch), yet lmkit-go still trains lm-100m **~26x
+slower** than PyTorch on the same 3070 Ti (3313 ms/step vs 127 ms; ~1300 XLA kernels &
+7.6 GB vs ~128 kernels & 4 GB). Ablation shows the gap is **broad**, not one op: the LM
+head is 36x slower but only 22% of the step; the rest of the model is ~24x. So this row's
+"⚙️ XLA gives fusion" is optimistic — XLA's compiled gemms/elementwise underperform
+PyTorch's eager cuDNN/cuBLAS/ATen at 100M/B=2, and the `fused CE/RMSNorm/SwiGLU` /
+kernel-authoring rows (marked 🚫) are where the real throughput lives. Closing it likely
+needs op-by-op fused custom-calls in go-xla (the flash pattern) or is partly an XLA
+small-scale ceiling. See `docs/specs/2026-06-22-flash-attention-design.md` Outcome.
 
 ## 4. Data · tokenization · serialization · hub · model libraries
 

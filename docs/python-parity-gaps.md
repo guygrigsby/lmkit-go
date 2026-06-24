@@ -87,8 +87,10 @@ These gate the replica train. lm-100m-en config values in parens.
   checkpoints. Cross-stack weight loading would go via safetensors.
 
 ## F. Backend / kernels / hardware (mostly ADR-0004, intentional)
-- 🧊 **FlashAttention** as an XLA op-graph — explicit `softmax(QKᵀ/√d)V` today;
-  O(seq²) memory. Fine at this scale; a perf milestone.
+- ✅ **FlashAttention** — cuDNN `__cudnn$fmha` custom-call (gomlx/compute/go-xla forks,
+  2026-06-23), parity-verified on sm_86. Scores no longer materialized. Earned ~1.4x; did
+  NOT close the ~26x throughput gap to PyTorch, which ablation shows is broad per-kernel
+  inefficiency, not attention. See `docs/specs/2026-06-22-flash-attention-design.md` Outcome.
 - 🧊 **ROCm** (an AMD/ROCm GPU) training path — PJRT-ROCm validation pending.
 - 🧊 **Metal** (Apple GPU) training — revive the PJRT-Metal bridge (jax-metal is
   abandoned). Workstream, not on the repro critical path.

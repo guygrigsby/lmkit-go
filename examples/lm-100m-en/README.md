@@ -61,4 +61,17 @@ The test runs 200 steps (a smoke check, not the full run). It skips if `LMKIT_DA
 
 ## Run log
 
-<!-- Record launch date, step-0 metrics, and subsequent checkpoints here. -->
+### 2026-06-24 — launch (trig, RTX 3070 Ti, CUDA/XLA)
+
+First lmkit-go pretraining run. Unblocked by the gomlx autodiff fix (matmul weight
+gradients now lower as tensor-core gemms instead of CUDA-core reductions, gomlx PR #428),
+which took the training step from ~3.0s to ~0.16s (~18x), reaching ~92% of eager PyTorch
+on the same GPU.
+
+- config: B=2 x grad_accum 32 (131,072 tok/step), lr 4e-4, WSD stable trunk (decay_frac=0), seed 1337
+- throughput: ~29,600 tok/s, step ~4.4s, ~17.8 TFLOP/s, peak VRAM 6.5 GB
+- step-0 eval: val_loss 10.556, perplexity 38,410 (random init)
+- early train_loss: step 20 = 10.43 -> step 60 = 8.7; grad_norm healthy, no NaN
+- ETA to Chinchilla floor (~2B tokens / 15k steps): ~18h; then a stable trunk until val plateaus
+- supervision: run under a process supervisor (systemd --user, runit, etc.), auto-resume from `latest/`, no restart on NaN (exit 2)
+- metrics: `<out_dir>/metrics.jsonl`
