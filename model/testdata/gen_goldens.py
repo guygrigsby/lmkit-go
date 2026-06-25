@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate JSON golden fixtures for lmkit-go model block parity tests.
 
-Runs on trig: `~/venvs/cuda/bin/python gen_goldens.py` (the Mac has no torch).
+Run on a host with PyTorch: `python gen_goldens.py`.
 Requires torch (CPU tensors only). Deterministic (seeded). Each block writes
 <block>.json with {config, inputs, weights, expected} as float32 row-major.
 """

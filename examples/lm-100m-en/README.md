@@ -61,7 +61,7 @@ The test runs 200 steps (a smoke check, not the full run). It skips if `LMKIT_DA
 
 ## Run log
 
-### 2026-06-24 — launch (trig, RTX 3070 Ti, CUDA/XLA)
+### 2026-06-24 — launch (RTX 3070 Ti 8 GB, CUDA/XLA)
 
 First lmkit-go pretraining run. Unblocked by the gomlx autodiff fix (matmul weight
 gradients now lower as tensor-core gemms instead of CUDA-core reductions, gomlx PR #428),
@@ -75,3 +75,15 @@ on the same GPU.
 - ETA to Chinchilla floor (~2B tokens / 15k steps): ~18h; then a stable trunk until val plateaus
 - supervision: run under a process supervisor (systemd --user, runit, etc.), auto-resume from `latest/`, no restart on NaN (exit 2)
 - metrics: `<out_dir>/metrics.jsonl`
+
+### 2026-06-25 — baseline reached, stopped at the Chinchilla budget
+
+Stopped at the ~2B-token Chinchilla budget to serve as the matched baseline for the Python
+`lmkit` vs lmkit-go comparison. Match on **step 15406** or **token count** (both runs use the
+same 131,072 tok/step config, so step and token count line up).
+
+- stop: step **15406**, tokens **2,019,295,232** (~2.02B); checkpoint `latest/checkpoint-...-step-00015406`
+- throughput: ~28,500 tok/s steady, ~163 ms/step, peak VRAM 6.5 GB
+- last eval: val_loss 2.378 (step 14000); val flattening ~2.3 to 2.4 over steps 10k to 14k
+- config: seed 1337, lr 4e-4, WSD stable trunk (decay_frac=0), bf16 on CUDA, cuDNN flash attention
+- per-step train_loss is noisy (~1.4 to 2.5); the eval curve is the comparison signal

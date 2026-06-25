@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the byte-level BPE equivalence fixture from the reference Python
-tokenizer. Run on trig in a venv with `tokenizers`:
+tokenizer. Run in a venv with `tokenizers`:
     python gen_encodings.py  # reads tokenizer.json, writes encodings.json
 """
 import json
