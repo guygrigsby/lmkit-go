@@ -24,7 +24,7 @@ flowchart TB
     ADP["backend/gomlx ✅<br/>the ONLY vendor importer<br/>runtime: construct · compile/exec · optimizer · checkpoint · device"]
   end
 
-  VENDOR["GoMLX · go-xla · PJRT ⚙️ inherited<br/>autodiff · op fusion · kernels · codegen<br/>CUDA (GPU host) · CPU/SimpleGo · ROCm/Metal (deferred)"]
+  VENDOR["GoMLX · go-xla · PJRT ⚙️ inherited<br/>autodiff · op fusion · kernels · codegen<br/>CUDA (GPU host) · CPU/SimpleGo · ROCm (RDNA4 ✅, decomposed attn) · Metal (deferred)"]
 
   CLI --> TRAIN
   CLI --> MODEL

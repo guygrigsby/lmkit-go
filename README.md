@@ -82,7 +82,11 @@ The device is chosen at runtime via `GOMLX_BACKEND`:
 
 - `go`: SimpleGo, pure-Go CPU backend (no XLA C dependency; what `make check` uses).
 - `xla:cpu`: XLA on CPU.
-- `xla:cuda`: XLA on an NVIDIA GPU; go-xla fetches the PJRT CUDA plugin on first run.
+- `xla:cuda`: XLA on an NVIDIA GPU; go-xla fetches the PJRT CUDA plugin on first run. cuDNN flash attention.
+- `xla:rocm`: XLA on an AMD GPU; validated on RDNA4 (gfx1201). Needs a one-time plugin setup, decomposed attention (no cuDNN flash).
+
+Setup directions for each, including the ROCm plugin install, are in
+[`docs/backends.md`](./docs/backends.md).
 
 ## Docs
 

@@ -128,8 +128,8 @@ Prove correctness with tests, numerically, before claiming it works:
 ## Environment notes
 
 - Train on a CUDA (NVIDIA/Linux) GPU host; a single ~8 GB card is enough for the
-  100M target. NVIDIA/CUDA is the natural first PJRT target; an AMD/ROCm card is a
-  later option (PJRT ROCm support is the open question there). Don't stack GPU jobs
-  — confirm the GPU is idle (`nvidia-smi`) and serialize per your environment.
+  100M target. NVIDIA/CUDA is the natural first PJRT target; an AMD/ROCm card also
+  works (validated on RDNA4/gfx1201, decomposed attention; see `docs/backends.md`).
+  Don't stack GPU jobs; confirm the GPU is idle and serialize per your environment.
 - Reuse existing monitoring: emit lmkit-compatible `metrics.jsonl` so a Grafana
   dashboard + the `lmkit` ops CLI manage runs with zero extra work.

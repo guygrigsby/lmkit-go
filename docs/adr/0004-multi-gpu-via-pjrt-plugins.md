@@ -58,4 +58,14 @@ Treat multi-GPU as a PJRT-plugin coverage problem, behind the backend boundary
   becomes a bridge-fix workstream like Metal.
 - If profiling later forces a hand-written kernel, that reverses part of this ADR
   and gets its own superseding ADR.
+
+## Update (2026-06-27): ROCm validated
+
+The upstream plugin behaved. lmkit-go runs on an RDNA4 card (gfx1201) via the JAX
+ROCm PJRT plugin loaded by go-xla, with the ROCm 7 userspace supplied as pip wheels
+(no system ROCm, no code change). `quickstart` passes matmul, autodiff and AdamW.
+The cuDNN flash custom-call does not carry over (NVIDIA-only), so attention falls
+back to the decomposed path on ROCm. Setup directions: `docs/backends.md`. ROCm is
+no longer a deferred/contingent item; an AMD fused-attention path (MIOpen) remains a
+later optimization.
 </content>

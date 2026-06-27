@@ -100,7 +100,10 @@ All built and exercised by the live run. lm-100m-en config values in parens.
   (gomlx #428, 2026-06-24); the live run now sustains ~29k tok/s, close to the PyTorch
   reference (~32k). Supersedes the "broad per-kernel inefficiency" read in the flash
   design doc's 2026-06-23 Outcome.
-- 🧊 **ROCm** (an AMD/ROCm GPU) training path — PJRT-ROCm validation pending.
+- ✅ **ROCm** (an AMD/ROCm GPU) training path — validated on RDNA4 (gfx1201) via the
+  JAX ROCm PJRT plugin (no system ROCm, no code change); `quickstart` passes. Decomposed
+  attention (the cuDNN flash custom-call is NVIDIA-only); AMD fused attention (MIOpen) is a
+  later optimization. Setup in `docs/backends.md`.
 - 🧊 **Metal** (Apple GPU) training — revive the PJRT-Metal bridge (jax-metal is
   abandoned). Workstream, not on the repro critical path.
 - ✅ **peak-VRAM** query — `go-nvml` poll (CUDA-only), wired into `metrics.jsonl`.
@@ -122,5 +125,6 @@ Chinchilla-budget reproduction is running on the 8GB GPU. The GoMLX gemm-gradien
 (#428) closed the throughput gap to roughly the PyTorch reference, retiring the "broad
 per-kernel inefficiency" concern. The remaining surface is post-reproduction:
 generation + KV cache, LLM-judge eval, SFT, and IO/hub (safetensors/GGUF/HF push).
-Optional completeness: a Go BPE trainer and an `eval` subcommand. Multi-GPU,
-ROCm/Metal, and hand-kernels stay intentional ADR-0004 deferrals.
+ROCm is now validated (RDNA4, decomposed attention). Optional completeness: a Go BPE
+trainer and an `eval` subcommand. Multi-GPU, Metal and hand-kernels stay intentional
+ADR-0004 deferrals.
