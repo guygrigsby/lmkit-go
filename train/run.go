@@ -163,8 +163,9 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 		eventKind = "resume"
 	}
 	_ = emit(metricsPath, map[string]any{
-		"event": eventKind,
-		"step":  step,
+		"event":     eventKind,
+		"step":      step,
+		"framework": "lmkit-go", // labels this worker on the metrics dashboard
 	})
 
 	np := nParams(mcfg)
