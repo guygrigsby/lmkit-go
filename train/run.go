@@ -157,19 +157,27 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 		bestVal = priorBestVal(metricsPath)
 	}
 
+	np := nParams(mcfg)
+	batchTokens := cfg.BatchSize * trainLoader.BlockSize() * cfg.GradAccum // tokens per optimizer step
+
+	// MLflow run: no-op unless MLFLOW_TRACKING_URI is set (gputex injects it). record
+	// mirrors every metrics.jsonl event to MLflow; both sinks get the same map.
+	ml := newMLflowLogger(cfg, mcfg, np)
+	record := func(m map[string]any) {
+		_ = emit(metricsPath, m)
+		ml.log(m)
+	}
+
 	// Emit start or resume event.
 	eventKind := "start"
 	if step > 0 {
 		eventKind = "resume"
 	}
-	_ = emit(metricsPath, map[string]any{
+	record(map[string]any{
 		"event":     eventKind,
 		"step":      step,
 		"framework": "lmkit-go", // labels this worker on the metrics dashboard
 	})
-
-	np := nParams(mcfg)
-	batchTokens := cfg.BatchSize * trainLoader.BlockSize() * cfg.GradAccum // tokens per optimizer step
 
 	// lastStepLoss tracks the most recent training loss for inclusion in eval events.
 	var lastStepLoss float64
@@ -179,7 +187,8 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 			if err := saveCheckpoint(store, latestDir); err != nil {
 				return 1, fmt.Errorf("run: sigterm save: %w", err)
 			}
-			_ = emit(metricsPath, map[string]any{"event": "sigterm", "step": step})
+			record(map[string]any{"event": "sigterm", "step": step})
+			ml.finishKilled()
 			return 0, nil
 		}
 
@@ -208,7 +217,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 			}
 			// Spec (M6): eval event fields: val_loss, val_perplexity, best_val, train_loss, lr, improved.
 			// val_perplexity = exp(min(val_loss, 20)) to avoid overflow on divergent evals.
-			_ = emit(metricsPath, map[string]any{
+			record(map[string]any{
 				"event":          "eval",
 				"step":           step,
 				"val_loss":       valLoss,
@@ -260,7 +269,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 				defer func() { recover() }() //nolint:errcheck
 				_ = saveCheckpoint(store, nanDir)
 			}()
-			_ = emit(metricsPath, map[string]any{
+			record(map[string]any{
 				"event": "nan",
 				"step":  step,
 				"train_loss": func() any {
@@ -273,6 +282,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 					return "-Inf"
 				}(),
 			})
+			ml.finishFailed()
 			return 2, nil
 		}
 
@@ -282,7 +292,7 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 		if cfg.LogInterval > 0 && int(step)%cfg.LogInterval == 0 {
 			tokPerSec := float64(batchTokens) / stepDur.Seconds()
 			tokensSeen := int64(step) * int64(batchTokens)
-			_ = emit(metricsPath, map[string]any{
+			record(map[string]any{
 				"event":        "train",
 				"step":         step,
 				"train_loss":   stepLoss,
@@ -305,10 +315,11 @@ func Run(cfg Config, mcfg lmodel.Config, trainLoader, valLoader *data.Loader) (i
 	if err := saveCheckpoint(store, latestDir); err != nil {
 		return 1, fmt.Errorf("run: final latest checkpoint: %w", err)
 	}
-	_ = emit(metricsPath, map[string]any{
+	record(map[string]any{
 		"event": "done",
 		"step":  step,
 	})
+	ml.finishDone()
 	return 0, nil
 }
 
