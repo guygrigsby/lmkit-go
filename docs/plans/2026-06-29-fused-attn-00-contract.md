@@ -25,8 +25,8 @@ The work ships in two stages. **Do Stage 1 in full — review — then Stage 2.*
 **Stage 1 — strict refactor to Jan's proposed API. No new attention variants.**
 - compute: add `QuerySeqLen`/`KeyValueSeqLen` config fields only; reference honors them; **CPU SDPA capability stays `false`** (see Contract A note); reference tested directly.
 - go-xla: sync branch; `CustomCallV2`; route the existing standard `__cudnn$fmhaSoftmax` target through it; seqlen `mask_type`; `client.Plugin().IsCUDA()` test; relax `flashSupported` for seqlens. No bias/dropout dispatch.
-- gomlx: delete `flash.go`; `WithFusion` + `useFusion` through `Core`; `WithSeqLens`; `SimpleAttention`; generalize tests over `TestOfficialBackends` + `backendSupportsFusion` + `GetOfficialBackend`; bench fixes (`FinalizeAll`, `for range`, `TestFusionThroughput`, flags not env).
-- lmkit-go: migrate `model/attention.go` `FlashAttention(...)` → `SimpleAttention(...)` (the deletion in gomlx breaks this build; same stage).
+- gomlx: delete `flash.go` (no replacement helper — see Contract D); `WithFusion` + `useFusion` through `Core`; `WithSeqLens`; generalize tests over `TestOfficialBackends` + `backendSupportsFusion` + `GetOfficialBackend`; bench fixes (`FinalizeAll`, `for range`, `TestFusionThroughput`, flags not env).
+- lmkit-go: migrate `model/attention.go` `FlashAttention(...)` → `InternalFusedOpCaller(fused, decomposed)` over the scope-free graph primitives (the deletion in gomlx breaks this build; same stage). See Contract F.
 - go-huggingface: thread seqlens into transformer attention (kept in-scope per Guy 2026-06-29, though Jan offered to take it).
 
 **Stage 2 — added variants: bias, dropout, bias+dropout (all bf16). FP8 stays paused.**
@@ -142,20 +142,6 @@ func (b *MultiHeadAttentionBuilder) WithFusion(enabled bool) *MultiHeadAttention
 // padding masking. Mutually exclusive with an explicit queryKeyMatrixMask.
 func (b *MultiHeadAttentionBuilder) WithSeqLens(querySeqLen, keyValueSeqLen *Node) *MultiHeadAttentionBuilder
 
-// [S1] SCOPE-FREE thin helper (decided 2026-06-29, option A). Fuses when the
-// backend supports it, decomposes otherwise — implemented directly over
-// InternalFusedOpCaller(fused, decomposed), NOT the MultiHeadAttention builder.
-// The pre-projected, externally-weighted drop-in for the deleted FlashAttention:
-// backend-generic (no "flash" in the name), causal, equal q/kv heads (caller
-// repeats KV first), NOT a parallel full API. lmkit-go — scope-free by design,
-// no model.Scope anywhere — is its first and motivating caller.
-//
-// DIVERGES from Jan's inline sketch (which took a *model.Scope and returned a
-// *MultiHeadAttentionBuilder). Flag in the PR. Rationale: pre-projected inputs
-// have no projection variables, so a scope is pure ceremony, and the only real
-// caller is scope-free; forcing a throwaway scope reads worse than this helper.
-func SimpleAttention(query, key, value *Node, scale float64) *Node
-
 // [S2] WithAttentionBias supplies an additive attention-score bias [B,H,S,Skv]
 // (ALiBi / relative-position). DISTINCT from UseProjectionBias (the Q/K/V dense
 // bias). Populates ScaledDotProductAttentionConfig.Bias. nil = unused.
@@ -163,6 +149,8 @@ func (b *MultiHeadAttentionBuilder) WithAttentionBias(bias *Node) *MultiHeadAtte
 ```
 
 `attention.Core` gains a trailing `useFusion bool` param (appended after `scoreSoftCap` — keeps the single production call site + test calls' positional args stable). The existing `Core` fused branch (attention.go:268-280) additionally gates on `useFusion`. `GOMLX_FUSION` env stays as a global override in `InternalFusedOpCaller`; `WithFusion(false)` is the per-call override.
+
+**No `SimpleAttention` helper** (decided 2026-06-29, on upstream merits — NOT a downstream consideration). Jan only hedged it ("if the use case is useful, we could..."). Any concrete version either (a) delegates to the builder/`Core` and therefore needs a `*model.Scope`, or (b) reimplements the fused-or-decomposed logic standalone — which is a *parallel path*, the exact duplication that deleting `flash.go` removes. The real primitives already cover the need: the `MultiHeadAttention` builder for the full path, and the scope-free `graph.BackendFusedScaledDotProductAttention` + `graph.InternalFusedOpCaller` for the bare fused-or-decomposed op. Don't add a third surface; if Jan wants the convenience helper he can shape it (builder-preconfiguring) on his own terms. The PR notes this as a deliberate omission.
 
 **[S2] dropout fused-gate.** Core's fused branch is currently gated `!dropoutActive` (active dropout forces the decomposed path). The dropout variant relaxes this: when the backend supports fused dropout, Core may fuse *with* dropout, threading the rate + seed/offset into the config. This gate change is Stage 2, not Stage 1.
 
@@ -174,7 +162,19 @@ Find the transformer attention call sites (they call `attention.MultiHeadAttenti
 
 ## Contract F — `lmkit-go` consumer (Stage 1, same stage as the gomlx deletion)
 
-`lmkit-go/model/attention.go:47` calls `attention.FlashAttention(q, k, v, scale)`, which gomlx Stage 1 deletes. Migrate it to the scope-free `attention.SimpleAttention(q, k, v, scale)` (returns `*Node`; pre-projected, bf16, causal — the same path `FlashAttention` took, now via `InternalFusedOpCaller` fused-or-decomposed). The `UseFlashAttention && bf16` guard collapses: fusion is automatic when the backend supports it, decomposed otherwise. Verify lmkit's existing attention parity test still passes (CPU decomposed) and, on the CUDA host, that the bf16 path still fuses.
+`lmkit-go/model/attention.go:47` calls `attention.FlashAttention(q, k, v, scale)`, which gomlx Stage 1 deletes. With no upstream `SimpleAttention`, lmkit migrates to the scope-free graph primitives directly (lmkit is scope-free and already owns a decomposed branch):
+
+```go
+out = g.InternalFusedOpCaller(
+    func() *g.Node { // fused
+        return g.BackendFusedScaledDotProductAttention(
+            q, k, v, nil, nH, nH, compute.AxesLayoutBSHD, scale, true /*causal*/, nil)
+    },
+    func() *g.Node { return decomposedAttention(q, k, v, scale) }, // lmkit's existing else-branch, factored out
+)
+```
+
+Factor lmkit's current decomposed else-branch (attention.go:48-66) into `decomposedAttention(q,k,v,scale)` so both the fused fallback and the non-bf16 path share it (removes lmkit's own duplication). `InternalFusedOpCaller` runs `fused`, catches `compute.IsNotImplemented`, falls back to `decomposed` — exactly what `FlashAttention` did internally. Keep the `UseFlashAttention && bf16` guard selecting fused-vs-direct-decomposed. This introduces no new gomlx API and no parallel path. Verify lmkit's existing parity test still passes (CPU → fallback) and, on the CUDA host, the bf16 path fuses. (`InternalFusedOpCaller`/`BackendFusedScaledDotProductAttention` carry an "Internal"/"Backend" prefix — they are gomlx's documented escape hatch, the same one `FlashAttention` used; acceptable from a consumer.)
 
 ---
 
