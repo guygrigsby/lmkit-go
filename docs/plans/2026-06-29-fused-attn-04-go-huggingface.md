@@ -4,6 +4,8 @@
 
 **Goal:** Thread per-batch sequence lengths from transformer attention call sites into `gomlx`'s `MultiHeadAttentionBuilder.WithSeqLens(...)`, so encoder models use padding masking via the fused path instead of materializing an `[S,Skv]` mask — guarded so models that supply no lengths are byte-for-byte unchanged.
 
+**Stage:** entirely **Stage 1** (seqlen plumbing only; no bias/dropout variants). Every task here is [S1]. Depends on gomlx Stage 1 (`WithSeqLens`).
+
 **Architecture:** This is the leaf consumer of the fused-attention chain (see contract repo dependency order). It produces no new public API; it rewires existing attention call sites in the transformers/encoder layers to optionally pass sequence lengths. Each rewrite is a guarded, opt-in branch: lengths present → `WithSeqLens`; lengths absent → the existing mask-matrix path, unchanged.
 
 **Tech Stack:** Go 1.26, `github.com/gomlx/go-huggingface`, `github.com/gomlx/gomlx` (local fork on branch `flash-attention`, supplying `WithSeqLens` per Contract D), `github.com/gomlx/go-xla`, `github.com/gomlx/compute`.
@@ -16,13 +18,13 @@ This plan implements **Contract E** and consumes **Contract D** from
 - **Consumes (Contract D, gomlx layers):**
   ```go
   func (b *MultiHeadAttentionBuilder) WithSeqLens(querySeqLen, keyValueSeqLen *Node) *MultiHeadAttentionBuilder
-  func (b *MultiHeadAttentionBuilder) UseFusion(enabled bool) *MultiHeadAttentionBuilder
+  func (b *MultiHeadAttentionBuilder) WithFusion(enabled bool) *MultiHeadAttentionBuilder
   ```
   `WithSeqLens` takes int32 `[B]` nodes and is **mutually exclusive** with an explicit query/key matrix mask. Supplied by the local gomlx fork.
 - **Produces (Contract E):** the rewired call sites — no exported symbols. The deliverable is behavior-preserving when no lengths are supplied, and a fused padding-mask path when they are.
 
 Global constraints (Go 1.26, no push/no PR, fallback-is-the-contract, voice rules
-for commits, CUDA tests on trig) are defined once in the contract and apply to every
+for commits, CUDA tests on the CUDA host) are defined once in the contract and apply to every
 task here. Not restated.
 
 ## Recon dependency note (read before executing)
@@ -501,7 +503,7 @@ paths; no CUDA required. The fused path resolves to the CPU `go` backend referen
 - [ ] **No push, no PR.** Plan ends at `git commit` on branch `fused-seqlen` in the
   local fork. Guy reviews diffs before anything reaches a remote.
 
-(No **[trig]** step in plan 04: the contract's 04 gate is Mac-only. cuDNN variant
+(No **[cuda]** step in plan 04: the contract's 04 gate is Mac-only. cuDNN variant
 coverage is gated in plans 02/03; here the CPU backend reference makes the seqlen
 parity test runnable on the Mac.)
 

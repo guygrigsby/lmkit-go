@@ -4,7 +4,13 @@
 
 **Goal:** Land the `go-xla` half of fused-attention upstreaming (PR gomlx/go-xla#37): a typed `CustomCallV2`, cuDNN fmha variant dispatch (bias / dropout / bias+dropout, all bf16), and seqlen padding masks — keeping every `__cudnn$fmha*` detail inside `go-xla`. FP8 is paused (no local sm_8.9+ hardware); fp8 input falls to `ErrNotImplemented` and is handed to janpfeifer — see Contract C.
 
-**Architecture:** This plan implements Contract B (CustomCallV2) and Contract C (fmha variant dispatch + seqlen masking) from the shared contract, and consumes Contract A (the `compute.ScaledDotProductAttentionConfig` fields produced by plan 01). The string-layout `CustomCall` is replaced by a `[][]int`-layout `CustomCallV2` that renders MLIR `dense<...>` internally; `compute/xla/flash.go` rewires onto it and grows a config-driven target selector. Nothing flash-/CUDA-specific leaks above the backend: callers still see only "FusedSDPA: supported or `ErrNotImplemented`".
+**Staging.** This plan ships in two stages, per the contract's "Staging" section. **Do Stage 1 in full — review — then Stage 2.** Every task below is tagged **[S1]** or **[S2]**:
+- **[S1]** (strict refactor to Jan's API; no new attention variants): Task 0 (sync), Task 1 (`CustomCallV2`), Task 2 (dispatch seam routing ONLY the standard `__cudnn$fmhaSoftmax`/`Backward` target + seqlen `mask_type`), the seqlen operand append (Task 3 [S1] part) + `flashSupported` relaxation (Task 4), and the `IsCUDA` test migration (Task 5). The fp8-paused dtype-gate unit test is also [S1].
+- **[S2]** (added variants, all bf16; fp8 stays paused): the bias/dropout/bias+dropout branches that EXTEND `selectFMHAVariant`, their target constants, the per-variant bias/dropout operand sets, and the `[cuda]` per-variant exec tests.
+
+**Cross-stage compile dependency (CRITICAL).** The S1 `selectFMHAVariant` **must not** reference `cfg.Bias` / `cfg.DropoutRate` / `cfg.DropoutSeed` / `cfg.DropoutOffset`. Those `compute.ScaledDotProductAttentionConfig` fields **do not exist until compute Stage 2** (Contract A is staged: S1 adds only `QuerySeqLen`/`KeyValueSeqLen`). So the S1 selector reads only `cfg.QuerySeqLen`/`cfg.KeyValueSeqLen` + the `causal` bool, and the S1 `fmhaVariant` struct omits the bias/dropout fields. Stage 2 ADDS those reads, the struct fields, and the variant target constants. Both versions are shown in full (Task 2 = S1 minimal, Task 2b = S2 extension). Referencing an S2 field in S1 code will not compile against the Stage-1 compute fork.
+
+**Architecture:** This plan implements Contract B (CustomCallV2) and Contract C (fmha variant dispatch + seqlen masking) from the shared contract, and consumes Contract A (the `compute.ScaledDotProductAttentionConfig` fields produced by plan 01, staged: S1 fields first). The string-layout `CustomCall` is replaced by a `[][]int`-layout `CustomCallV2` that renders MLIR `dense<...>` internally; `compute/xla/flash.go` rewires onto it and grows a config-driven target selector. Nothing flash-/CUDA-specific leaks above the backend: callers still see only "FusedSDPA: supported or `ErrNotImplemented`".
 
 **Tech Stack:** Go 1.26, `github.com/gomlx/go-xla` (PR branch `flash-attention`), StableHLO emitter (`stablehlo` package), PJRT (`pjrt` package), cuDNN fMHA custom-calls. Consumes `github.com/gomlx/compute` (PR branch `flash-customcall`, via local `replace`).
 
@@ -14,7 +20,7 @@
 
 - **Go 1.26.** Module: `github.com/gomlx/go-xla`. Consumes `github.com/gomlx/compute` via the local `replace` already in this fork's `go.mod`/`go.work`.
 - **No push, no PR.** Every task ends at `git commit` on branch `flash-attention` in `/Users/guygrigsby/projects/forks/go-xla`. Guy reviews all diffs before anything reaches a remote.
-- **CUDA-gated tests run on trig, not the Mac.** CI has no CUDA. Tasks whose test needs cuDNN execution are marked **[trig]**: build natively on trig, `GOMLX_BACKEND=xla:cuda`, wrap GPU work in `gputex run`. The CustomCallV2 layout-rendering unit test is CPU-only and runs on the Mac.
+- **CUDA-gated tests run on the CUDA host, not the Mac.** CI has no CUDA. Tasks whose test needs cuDNN execution are marked **[cuda]**: build natively on the CUDA host, `GOMLX_BACKEND=xla:cuda`, serialize GPU jobs if the card is shared. The CustomCallV2 layout-rendering unit test is CPU-only and runs on the Mac.
 - **Fallback is the contract.** Any unsupported config (wrong dtype, unsupported variant/layout) returns a wrapped `compute.ErrNotImplemented`; the caller falls back to the decomposed path. Never panic on an unsupported-but-valid request.
 - **Commit voice:** terse, verb-first, no em/en dashes, prefix `compute/xla:` (or `stablehlo:` for the customcall.go-only task), no Claude attribution.
 
@@ -27,7 +33,7 @@
 
 ---
 
-## Task 0: Sync local branch to `fork/flash-attention` (NOT SKIPPABLE)
+## Task 0 [S1]: Sync local branch to `fork/flash-attention` (NOT SKIPPABLE)
 
 The local checkout is on a different branch (`rocm-flash-attention`); `fork/flash-attention` has the maintainer's backend-options merge. Every downstream task assumes this synced state (the line numbers and the `ScaledDotProductAttentionConfig` param already present in `flash.go` come from the merge).
 
@@ -70,13 +76,22 @@ git grep -n "ScaledDotProductAttentionConfig" compute/xla/flash.go
 
 Expected: the string `CustomCall` exists in `stablehlo/customcall.go`; `customCall` wrapper at ~`compute/xla/ops.go:826`; `flash.go` references `*compute.ScaledDotProductAttentionConfig` in both fused method signatures. If `ScaledDotProductAttentionConfig` is absent, plan 01 (compute) has not been integrated — STOP; this plan consumes Contract A.
 
+Stage check: confirm the integrated compute fork matches the stage you are executing. For Stage 1, the struct carries `QuerySeqLen`/`KeyValueSeqLen` but **not** `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset` (those land in compute Stage 2):
+
+```bash
+git grep -n "QuerySeqLen\|KeyValueSeqLen" $(go env GOMODCACHE >/dev/null 2>&1; go list -m -f '{{.Dir}}' github.com/gomlx/compute)/scaleddotproductattention.go 2>/dev/null \
+  || echo "check the compute fork's config struct manually"
+```
+
+Expected (Stage 1): `QuerySeqLen`/`KeyValueSeqLen` present, bias/dropout fields absent. If the bias/dropout fields are already present, compute Stage 2 has landed — the S1/S2 split below is then a code-organization concern only, but still keep S1 `selectFMHAVariant` free of the S2 field reads so the two stages stay independently reviewable.
+
 - [ ] **Step 5: No commit**
 
 Task 0 is a branch sync, not a code change. Do not commit. Downstream tasks commit their own work.
 
 ---
 
-## Task 1: `CustomCallV2` with typed `[][]int` layouts (Contract B)
+## Task 1 [S1]: `CustomCallV2` with typed `[][]int` layouts (Contract B)
 
 Replace the string-layout `CustomCall` with the typed, versioned `CustomCallV2`. Move the MLIR `dense<...>` rendering inside it (built from `[][]int`; a nil entry/slice means row-major = decreasing order over the rank). The layout-rendering helper is the CPU-testable unit. Then remove the old `CustomCall` and rewire the `compute/xla/ops.go` `customCall` wrapper onto `CustomCallV2`.
 
@@ -368,26 +383,29 @@ git commit -m "compute/xla: typed CustomCallV2 with [][]int layouts, render MLIR
 
 ---
 
-## Task 2: Rewire `flash.go` onto config-driven targets and backend_config (Contract C scaffolding)
+## Task 2 [S1]: Rewire `flash.go` onto config-driven targets and backend_config — standard target only (Contract C scaffolding)
 
-Restructure `flash.go` so the cuDNN target and `mask_type` come from the config rather than hardcoded constants. This task introduces the dispatch seam (functions + a variant struct) and routes the existing causal-bf16 path through it, with no behavior change yet. Tasks 3 and 4 add the bias/dropout/seqlen branches onto this seam.
+Restructure `flash.go` so the cuDNN target and `mask_type` come from the config rather than hardcoded constants. This task introduces the dispatch seam (functions + a variant struct) and routes the existing causal-bf16 path through it, with no behavior change yet. **S1 routes ONLY the standard `__cudnn$fmhaSoftmax`/`__cudnn$fmhaSoftmaxBackward` target**; `mask_type` derives from `causal` + seqlens. Task 4 relaxes `flashSupported` for seqlens onto this same seam. The bias/dropout branches that extend this selector are **Task 2b [S2]**.
+
+**Cross-stage compile dependency (read before writing code):** the S1 `selectFMHAVariant` here reads **only** `cfg.QuerySeqLen`/`cfg.KeyValueSeqLen` (compute S1 fields) and the `causal` bool. It **must not** reference `cfg.Bias` / `cfg.DropoutRate` / `cfg.DropoutSeed` / `cfg.DropoutOffset` — those fields are not on the struct until compute Stage 2, so a reference would not compile against the Stage-1 compute fork. The `fmhaVariant` struct here is correspondingly minimal (no `hasBias`/`dropoutRate`). Task 2b adds those reads, fields, and the variant target constants.
 
 **Files:**
 - Modify: `compute/xla/flash.go`
 - Test: `compute/xla/flash_dispatch_test.go` (create) — CPU-testable pure-function tests for the selector and backend_config builder
 
 **Interfaces:**
-- Consumes: `*compute.ScaledDotProductAttentionConfig` (Contract A: fields `Bias`, `QuerySeqLen`, `KeyValueSeqLen`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`); `dtypes.BFloat16`, `dtypes.Float16`.
-- Produces:
+- Consumes: `*compute.ScaledDotProductAttentionConfig` (Contract A **S1 fields only**: `QuerySeqLen`, `KeyValueSeqLen`); `dtypes.BFloat16`, `dtypes.Float16`.
+- Produces (S1 minimal forms; Task 2b extends them):
   ```go
   // compute/xla/flash.go
   type fmhaVariant struct {
       fwdTarget, bwdTarget string
       maskType             string // "CAUSAL" | "PADDING" | "PADDING_CAUSAL" | "NO_MASK"
-      dropoutRate          float64
-      hasBias, hasSeqLens  bool
+      hasSeqLens           bool
+      // [S2] adds: dropoutRate float64; hasBias bool
   }
-  // selectFMHAVariant maps dtype + config -> targets/maskType, or ErrNotImplemented.
+  // selectFMHAVariant maps dtype + (causal, seqlens) -> standard target/maskType, or ErrNotImplemented.
+  // [S2] extends with the bias/dropout/bias+dropout precedence branches.
   func selectFMHAVariant(op string, qkvDType dtypes.DType, causal bool,
       cfg *compute.ScaledDotProductAttentionConfig) (fmhaVariant, error)
   // flashBackendConfigV builds the cudnn_fmha_backend_config for a variant.
@@ -461,65 +479,47 @@ go test ./compute/xla/ -run 'TestSelectFMHAVariant|TestFlashBackendConfigV' -v
 
 Expected: FAIL — `undefined: selectFMHAVariant`, `undefined: fmhaVariant`, `undefined: flashBackendConfigV`.
 
-- [ ] **Step 3: Add the variant struct, selector, and parameterized backend_config builder**
+- [ ] **Step 3: Add the variant struct, selector, and parameterized backend_config builder (S1 minimal)**
 
-Add to `flash.go` (replace the `fmhaForwardTarget`/`fmhaBackwardTarget` const block with the full target set, and add the new functions):
+Add to `flash.go` (replace the `fmhaForwardTarget`/`fmhaBackwardTarget` const block with the standard-target pair, and add the new functions). **S1 defines only the standard `fmhaSoftmaxFwd`/`fmhaSoftmaxBwd` pair**; Task 2b [S2] adds the `fmhaScaleBias*`/`*Dropout` constants. The selector here reads only seqlens + causal — no `cfg.Bias`/`cfg.DropoutRate` (those struct fields do not exist in the Stage-1 compute fork).
 
 ```go
-// cuDNN fused-attention custom-call targets. Forward/backward pairs per variant.
+// cuDNN fused-attention custom-call targets. S1 wires the standard softmax pair only.
+// [S2] (Task 2b) adds the fmhaScaleBias* / *Dropout / fmhaScaleBias*Dropout target rows.
+// FP8 targets (__cudnn$fmhaSoftmaxF8 / …BackwardF8) are intentionally NOT defined:
+// fp8 fmha is paused (no local sm_8.9+ hardware to test). fp8 input dtype falls to
+// ErrNotImplemented in selectFMHAVariant. Add that row when wiring fp8 on Hopper/Ada.
 const (
-	fmhaSoftmaxFwd                  = "__cudnn$fmhaSoftmax"
-	fmhaSoftmaxBwd                  = "__cudnn$fmhaSoftmaxBackward"
-	fmhaScaleBiasSoftmaxFwd         = "__cudnn$fmhaScaleBiasSoftmax"
-	fmhaScaleBiasSoftmaxBwd         = "__cudnn$fmhaScaleBiasSoftmaxBackward"
-	fmhaSoftmaxDropoutFwd           = "__cudnn$fmhaSoftmaxDropout"
-	fmhaSoftmaxDropoutBwd           = "__cudnn$fmhaSoftmaxDropoutBackward"
-	fmhaScaleBiasSoftmaxDropoutFwd  = "__cudnn$fmhaScaleBiasSoftmaxDropout"
-	fmhaScaleBiasSoftmaxDropoutBwd  = "__cudnn$fmhaScaleBiasSoftmaxDropoutBackward"
-	// FP8 targets (__cudnn$fmhaSoftmaxF8 / …BackwardF8) are intentionally NOT defined:
-	// fp8 fmha is paused (no local sm_8.9+ hardware to test). fp8 input dtype falls to
-	// ErrNotImplemented in selectFMHAVariant. Add the row here when wiring fp8 on Hopper/Ada.
+	fmhaSoftmaxFwd = "__cudnn$fmhaSoftmax"
+	fmhaSoftmaxBwd = "__cudnn$fmhaSoftmaxBackward"
 )
 
 // fmhaVariant captures the config-derived custom-call selection: the fwd/bwd targets, the
 // backend_config mask_type, and the operand-set flags. Built by selectFMHAVariant.
+// S1 fields only; [S2] (Task 2b) adds `dropoutRate float64` and `hasBias bool`.
 type fmhaVariant struct {
 	fwdTarget, bwdTarget string
 	maskType             string // "CAUSAL" | "PADDING" | "PADDING_CAUSAL" | "NO_MASK"
-	dropoutRate          float64
-	hasBias, hasSeqLens  bool
+	hasSeqLens           bool
 }
 
-// selectFMHAVariant maps the q/k/v dtype and config to a cuDNN variant, following Contract C
-// precedence (bias+dropout > bias > dropout > standard). Dtype gate: all wired variants accept
-// f16/bf16 only. Anything else (incl. fp8 e4m3fn/e5m2 — paused, no local hardware) ->
-// ErrNotImplemented, and the caller falls back to the decomposed path.
+// selectFMHAVariant maps the q/k/v dtype and (causal, seqlens) to a cuDNN variant. S1 routes the
+// standard softmax target only. Dtype gate: f16/bf16 only; anything else (incl. fp8 e4m3fn/e5m2 —
+// paused, no local hardware) -> ErrNotImplemented, and the caller falls back to the decomposed path.
 // mask_type derives from causal + seqlens: PADDING_CAUSAL (both), PADDING (seqlens only),
 // CAUSAL (causal only), NO_MASK (neither).
+//
+// S1 reads ONLY cfg.QuerySeqLen/cfg.KeyValueSeqLen (the compute Stage-1 fields). It must not touch
+// cfg.Bias/cfg.DropoutRate/cfg.DropoutSeed/cfg.DropoutOffset — those land in compute Stage 2 and
+// are wired here by Task 2b [S2], which extends this function with the bias/dropout precedence.
 func selectFMHAVariant(op string, qkvDType dtypes.DType, causal bool,
 	cfg *compute.ScaledDotProductAttentionConfig) (fmhaVariant, error) {
 	var v fmhaVariant
-	hasBias := cfg != nil && cfg.Bias != nil
-	dropout := 0.0
-	if cfg != nil {
-		dropout = cfg.DropoutRate
-	}
 	hasSeqLens := cfg != nil && cfg.QuerySeqLen != nil && cfg.KeyValueSeqLen != nil
 
-	isHalf := qkvDType == dtypes.Float16 || qkvDType == dtypes.BFloat16
-
-	switch {
-	case isHalf:
-		switch {
-		case hasBias && dropout > 0:
-			v.fwdTarget, v.bwdTarget = fmhaScaleBiasSoftmaxDropoutFwd, fmhaScaleBiasSoftmaxDropoutBwd
-		case hasBias:
-			v.fwdTarget, v.bwdTarget = fmhaScaleBiasSoftmaxFwd, fmhaScaleBiasSoftmaxBwd
-		case dropout > 0:
-			v.fwdTarget, v.bwdTarget = fmhaSoftmaxDropoutFwd, fmhaSoftmaxDropoutBwd
-		default:
-			v.fwdTarget, v.bwdTarget = fmhaSoftmaxFwd, fmhaSoftmaxBwd
-		}
+	switch qkvDType {
+	case dtypes.Float16, dtypes.BFloat16:
+		v.fwdTarget, v.bwdTarget = fmhaSoftmaxFwd, fmhaSoftmaxBwd
 	default:
 		// fp8 (e4m3fn/e5m2) lands here too: paused, not wired. NotImplemented -> decomposed.
 		return v, errors.Wrapf(compute.ErrNotImplemented,
@@ -536,18 +536,17 @@ func selectFMHAVariant(op string, qkvDType dtypes.DType, causal bool,
 	default:
 		v.maskType = "NO_MASK"
 	}
-	v.dropoutRate = dropout
-	v.hasBias = hasBias
 	v.hasSeqLens = hasSeqLens
 	return v, nil
 }
 
-// flashBackendConfigV builds a cudnn_fmha_backend_config for the given variant: mask_type and
-// dropout_rate come from v, the score-matrix dims [B,H,S,S] and fmha_scale from the shape,
-// dotDimNumbers carries the bmm dot_dimension_numbers JSON (the fwd/bwd-specific part).
+// flashBackendConfigV builds a cudnn_fmha_backend_config for the given variant: mask_type comes
+// from v, the score-matrix dims [B,H,S,S] and fmha_scale from the shape, dotDimNumbers carries the
+// bmm dot_dimension_numbers JSON (the fwd/bwd-specific part). S1 has no dropout, so dropout_rate is
+// the literal 0; Task 2b [S2] switches it to formatScale(v.dropoutRate).
 func flashBackendConfigV(b, h, s int, scale float64, dotDimNumbers string, v fmhaVariant) string {
-	return fmt.Sprintf(`{"operation_queue_id": "0", "cudnn_fmha_backend_config": {"algorithm": {"algo_id": "0", "math_type": "TENSOR_OP_MATH", "tuning_knobs": {"17": "1", "24": "0"}, "is_cudnn_frontend": true, "workspace_size": "0"}, "fmha_scale": %s, "intermediate_tensor_shape": {"element_type": "BF16", "dimensions": ["%d", "%d", "%d", "%d"], "tuple_shapes": [], "layout": {"dim_level_types": [], "dim_unique": [], "dim_ordered": [], "minor_to_major": ["3", "2", "1", "0"], "tiles": [], "element_size_in_bits": "0", "memory_space": "0", "index_primitive_type": "PRIMITIVE_TYPE_INVALID", "pointer_primitive_type": "PRIMITIVE_TYPE_INVALID", "dynamic_shape_metadata_prefix_bytes": "0"}, "is_dynamic_dimension": [false, false, false, false]}, "is_flash_attention": true, "mask_type": "%s", %s, "dropout_rate": %s, "seed": 42, "sliding_window_length": 0, "max_seg_per_batch": 1, "is_paged_attention": false}}`,
-		formatScale(scale), b, h, s, s, v.maskType, dotDimNumbers, formatScale(v.dropoutRate))
+	return fmt.Sprintf(`{"operation_queue_id": "0", "cudnn_fmha_backend_config": {"algorithm": {"algo_id": "0", "math_type": "TENSOR_OP_MATH", "tuning_knobs": {"17": "1", "24": "0"}, "is_cudnn_frontend": true, "workspace_size": "0"}, "fmha_scale": %s, "intermediate_tensor_shape": {"element_type": "BF16", "dimensions": ["%d", "%d", "%d", "%d"], "tuple_shapes": [], "layout": {"dim_level_types": [], "dim_unique": [], "dim_ordered": [], "minor_to_major": ["3", "2", "1", "0"], "tiles": [], "element_size_in_bits": "0", "memory_space": "0", "index_primitive_type": "PRIMITIVE_TYPE_INVALID", "pointer_primitive_type": "PRIMITIVE_TYPE_INVALID", "dynamic_shape_metadata_prefix_bytes": "0"}, "is_dynamic_dimension": [false, false, false, false]}, "is_flash_attention": true, "mask_type": "%s", %s, "dropout_rate": 0, "seed": 42, "sliding_window_length": 0, "max_seg_per_batch": 1, "is_paged_attention": false}}`,
+		formatScale(scale), b, h, s, s, v.maskType, dotDimNumbers)
 }
 ```
 
@@ -631,62 +630,192 @@ git commit -m "compute/xla: config-driven fmha target + mask_type selection seam
 
 ---
 
-## Task 3: Bias, dropout, and seqlen operand sets (Contract C)
+## Task 2b [S2]: Extend `selectFMHAVariant` with bias/dropout target branches (Contract C)
 
-Build the right operand list per variant: bias adds a `[B,H,S,Skv]` bias operand; dropout adds the seed/offset operands and threads `dropout_rate` into the config; seqlens append the query/kv length operands. The dtype gate already lives in `selectFMHAVariant` (Task 2); this task wires the operands and layouts. (FP8 is paused — `selectFMHAVariant` returns `ErrNotImplemented` for fp8 before any operand work, so there is no F8 operand set here.)
+**Stage 2.** Now that compute Stage 2 has added `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset` to `ScaledDotProductAttentionConfig`, extend the S1 selector (Task 2) with the bias/dropout/bias+dropout precedence branches and the per-variant target constants. This is a pure addition onto the S1 seam — the standard-target path and the `mask_type` derivation are unchanged. Operand sets for the new variants land in Task 3b [S2]; this task only picks the target and threads `dropoutRate`/`hasBias` into the variant + backend_config.
+
+**Cross-stage note:** this task is the *only* place `cfg.Bias`/`cfg.DropoutRate` may be read. It does not compile against the Stage-1 compute fork (those fields are absent there) — it is gated behind compute Stage 2 by the dependency order.
+
+**Files:**
+- Modify: `compute/xla/flash.go` (the target const block, `fmhaVariant`, `selectFMHAVariant`, `flashBackendConfigV`)
+- Test: `compute/xla/flash_dispatch_test.go` (extend) — CPU dispatch-unit tests for the new precedence
+
+**Interfaces:**
+- Consumes: `*compute.ScaledDotProductAttentionConfig` **S2 fields** (`Bias`, `DropoutRate`); the S1 `fmhaVariant`/`selectFMHAVariant`/`flashBackendConfigV` (Task 2).
+- Produces: extended `fmhaVariant` (adds `dropoutRate`, `hasBias`), extended `selectFMHAVariant` (bias/dropout branches), the `fmhaScaleBias*`/`*Dropout` target constants, `flashBackendConfigV` threading `dropout_rate` from the variant.
+
+- [ ] **Step 1: Write the failing dispatch tests for the new precedence (CPU, runs on Mac)**
+
+Add to `compute/xla/flash_dispatch_test.go`:
+
+```go
+func TestSelectFMHAVariant_Bias(t *testing.T) {
+	cfg := &compute.ScaledDotProductAttentionConfig{Bias: dummyValue(t)}
+	v, err := selectFMHAVariant("op", dtypes.BFloat16, true, cfg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if v.fwdTarget != "__cudnn$fmhaScaleBiasSoftmax" || v.bwdTarget != "__cudnn$fmhaScaleBiasSoftmaxBackward" {
+		t.Errorf("targets = %q / %q", v.fwdTarget, v.bwdTarget)
+	}
+	if !v.hasBias {
+		t.Error("hasBias = false, want true")
+	}
+}
+
+func TestSelectFMHAVariant_Dropout(t *testing.T) {
+	cfg := &compute.ScaledDotProductAttentionConfig{DropoutRate: 0.1}
+	v, err := selectFMHAVariant("op", dtypes.BFloat16, true, cfg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if v.fwdTarget != "__cudnn$fmhaSoftmaxDropout" || v.bwdTarget != "__cudnn$fmhaSoftmaxDropoutBackward" {
+		t.Errorf("targets = %q / %q", v.fwdTarget, v.bwdTarget)
+	}
+	if v.dropoutRate != 0.1 {
+		t.Errorf("dropoutRate = %v, want 0.1", v.dropoutRate)
+	}
+}
+
+func TestSelectFMHAVariant_BiasDropoutPrecedence(t *testing.T) {
+	cfg := &compute.ScaledDotProductAttentionConfig{Bias: dummyValue(t), DropoutRate: 0.1}
+	v, err := selectFMHAVariant("op", dtypes.BFloat16, true, cfg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if v.fwdTarget != "__cudnn$fmhaScaleBiasSoftmaxDropout" {
+		t.Errorf("fwdTarget = %q, want bias+dropout target", v.fwdTarget)
+	}
+}
+
+func TestFlashBackendConfigV_DropoutRateFromVariant(t *testing.T) {
+	v := fmhaVariant{maskType: "CAUSAL", dropoutRate: 0.1}
+	cfg := flashBackendConfigV(2, 12, 2048, 0.125, `"x": 1`, v)
+	if !strings.Contains(cfg, `"dropout_rate": 0.1`) {
+		t.Errorf("backend_config missing dropout_rate 0.1:\n%s", cfg)
+	}
+}
+```
+
+`dummyValue(t)` returns any non-nil `compute.Value` for the bias-set check (the selector only tests `cfg.Bias != nil`); a tiny graph constant on a CPU backend suffices — grep the package's other CPU `_test.go` files for the established way to mint a `compute.Value` and reuse it rather than inventing one.
+
+- [ ] **Step 2: Run to verify it fails**
+
+```bash
+cd /Users/guygrigsby/projects/forks/go-xla
+go test ./compute/xla/ -run 'TestSelectFMHAVariant_(Bias|Dropout|BiasDropout)|TestFlashBackendConfigV_Dropout' -v
+```
+
+Expected: FAIL — the bias/dropout branches and the `fmhaScaleBias*`/`*Dropout` constants do not exist yet; `fmhaVariant` has no `dropoutRate`/`hasBias` fields.
+
+- [ ] **Step 3: Add the variant target constants, extend the struct and the selector**
+
+Extend the target const block (add to the S1 pair):
+
+```go
+const (
+	fmhaSoftmaxFwd = "__cudnn$fmhaSoftmax"
+	fmhaSoftmaxBwd = "__cudnn$fmhaSoftmaxBackward"
+	// [S2] bias / dropout / bias+dropout variants.
+	fmhaScaleBiasSoftmaxFwd        = "__cudnn$fmhaScaleBiasSoftmax"
+	fmhaScaleBiasSoftmaxBwd        = "__cudnn$fmhaScaleBiasSoftmaxBackward"
+	fmhaSoftmaxDropoutFwd          = "__cudnn$fmhaSoftmaxDropout"
+	fmhaSoftmaxDropoutBwd          = "__cudnn$fmhaSoftmaxDropoutBackward"
+	fmhaScaleBiasSoftmaxDropoutFwd = "__cudnn$fmhaScaleBiasSoftmaxDropout"
+	fmhaScaleBiasSoftmaxDropoutBwd = "__cudnn$fmhaScaleBiasSoftmaxDropoutBackward"
+)
+```
+
+Extend `fmhaVariant` with the S2 fields:
+
+```go
+type fmhaVariant struct {
+	fwdTarget, bwdTarget string
+	maskType             string // "CAUSAL" | "PADDING" | "PADDING_CAUSAL" | "NO_MASK"
+	hasSeqLens           bool
+	dropoutRate          float64 // [S2]
+	hasBias              bool    // [S2]
+}
+```
+
+Replace the dtype switch's bf16/f16 arm in `selectFMHAVariant` with the precedence branch (the fp8/default `ErrNotImplemented` arm and the `mask_type` block stay exactly as S1 left them):
+
+```go
+	hasBias := cfg != nil && cfg.Bias != nil
+	dropout := 0.0
+	if cfg != nil {
+		dropout = cfg.DropoutRate
+	}
+
+	switch qkvDType {
+	case dtypes.Float16, dtypes.BFloat16:
+		// Contract C precedence: bias+dropout > bias > dropout > standard.
+		switch {
+		case hasBias && dropout > 0:
+			v.fwdTarget, v.bwdTarget = fmhaScaleBiasSoftmaxDropoutFwd, fmhaScaleBiasSoftmaxDropoutBwd
+		case hasBias:
+			v.fwdTarget, v.bwdTarget = fmhaScaleBiasSoftmaxFwd, fmhaScaleBiasSoftmaxBwd
+		case dropout > 0:
+			v.fwdTarget, v.bwdTarget = fmhaSoftmaxDropoutFwd, fmhaSoftmaxDropoutBwd
+		default:
+			v.fwdTarget, v.bwdTarget = fmhaSoftmaxFwd, fmhaSoftmaxBwd
+		}
+	default:
+		return v, errors.Wrapf(compute.ErrNotImplemented,
+			"%s: cuDNN fmha needs f16/bf16, got %s", op, qkvDType)
+	}
+```
+
+And before `return v, nil`, set the new fields:
+
+```go
+	v.dropoutRate = dropout
+	v.hasBias = hasBias
+```
+
+Thread `dropout_rate` through `flashBackendConfigV`: change the literal `"dropout_rate": 0` back to `"dropout_rate": %s` and append `formatScale(v.dropoutRate)` to the args (the S1 form hardcoded 0; S2 makes it variant-driven).
+
+- [ ] **Step 4: Run the dispatch tests and build**
+
+```bash
+cd /Users/guygrigsby/projects/forks/go-xla
+go test ./compute/xla/ -run 'TestSelectFMHAVariant|TestFlashBackendConfigV' -v
+go build ./compute/...
+```
+
+Expected: PASS (S1 + S2 dispatch tests); build exit 0.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add compute/xla/flash.go compute/xla/flash_dispatch_test.go
+git commit -m "compute/xla: extend fmha selector with bias/dropout variant targets"
+```
+
+---
+
+## Task 3 [S1]: Seqlen operand set + fp8-paused dtype gate (Contract C)
+
+Build the standard-variant operand list: q/k/v always, plus the query/kv seqlen operands when the variant carries them. The bias/dropout operand sets are **Task 3b [S2]**. The dtype gate already lives in `selectFMHAVariant` (Task 2); this task adds the seqlen operands + the CPU fp8-paused unit test that pins the gate's default branch (present from S1).
+
+**Cross-stage note:** the S1 operand builder branches only on `variant.hasSeqLens` (an S1 struct field). It must not reference `variant.hasBias` / `variant.dropoutRate` — those fields are added by Task 2b [S2], and `options.Bias` / `options.DropoutSeed` / `options.DropoutOffset` do not exist on the Stage-1 compute config. Task 3b adds those branches.
 
 **Files:**
 - Modify: `compute/xla/flash.go`
-- Test: `compute/xla/flash_variants_cuda_test.go` (create) — **[trig]** execution tests, one per wired variant (bias, dropout)
 - Test: `compute/xla/flash_dispatch_test.go` (the CPU dispatch-unit-test file from Task 2) — add the fp8-paused `TestSelectFMHAVariant_FP8NotImplemented` here (CPU, no cuda)
 
 **Interfaces:**
-- Consumes: `fmhaVariant` (Task 2); `cfg.Bias`, `cfg.DropoutSeed`, `cfg.DropoutOffset` (Contract A); `f.customCall` ([][]int layouts, Task 1).
+- Consumes: `fmhaVariant.hasSeqLens` (Task 2); `cfg.QuerySeqLen`, `cfg.KeyValueSeqLen` (Contract A S1); `f.customCall` ([][]int layouts, Task 1).
 - Produces: forward/backward operand builders inside the two fused methods (no new exported names; the variant struct drives them).
 
-- [ ] **Step 1: Write the [trig] variant execution tests**
+- [ ] **Step 1: Pin the fp8-paused seam (CPU unit test, runs on Mac)**
 
-`compute/xla/flash_variants_cuda_test.go` (the `//go:build` tag keeps it off the Mac build is unnecessary — it self-skips on non-cuda; mark each as **[trig]**):
-
-```go
-package xla
-
-import (
-	"testing"
-
-	"github.com/gomlx/compute"
-	"github.com/gomlx/compute/dtypes"
-)
-
-// [trig] runs under GOMLX_BACKEND=xla:cuda. Each builds a tiny fused-attention graph for one
-// variant and asserts it executes (output finite, right shape). q=k=v=ones makes the softmax
-// uniform so the bias-free output is all ~1.0; with bias the output stays finite.
-func TestFMHAVariant_Bias_trig(t *testing.T) {
-	be := getFusionBackend(t) // helper below; skips if backend can't fuse bf16 causal
-	cfg := &compute.ScaledDotProductAttentionConfig{Bias: makeBias(t, be)}
-	out := runFusedFwd(t, be, dtypes.BFloat16, true, cfg)
-	assertFiniteBSHD(t, out)
-}
-
-func TestFMHAVariant_Dropout_trig(t *testing.T) {
-	be := getFusionBackend(t)
-	cfg := &compute.ScaledDotProductAttentionConfig{
-		DropoutRate:   0.1,
-		DropoutSeed:   makeI64Scalar(t, be, 42),
-		DropoutOffset: makeI64Scalar(t, be, 0),
-	}
-	out := runFusedFwd(t, be, dtypes.BFloat16, true, cfg)
-	assertFiniteBSHD(t, out)
-}
-
-```
-
-And in `compute/xla/flash_dispatch_test.go` (CPU file, Mac-runnable), pin the fp8-paused seam:
+In `compute/xla/flash_dispatch_test.go` (CPU file, Mac-runnable), pin the fp8-paused seam. This exercises the S1 dtype gate's `default` branch — no bias/dropout fields needed, so it is fully [S1]:
 
 ```go
 // fp8 is paused (no local sm_8.9+ hardware). Pin the seam: an fp8 dtype must select
 // no variant and surface ErrNotImplemented so the caller falls back to decomposed.
-// Pure unit test on selectFMHAVariant — CPU, runs on the Mac (no [trig]).
+// Pure unit test on selectFMHAVariant — CPU, runs on the Mac (no [cuda]).
 func TestSelectFMHAVariant_FP8NotImplemented(t *testing.T) {
 	_, err := selectFMHAVariant("fmha", dtypes.F8E4M3FN, true, nil)
 	require.True(t, compute.IsNotImplemented(err), "fp8 must be NotImplemented (paused), got %v", err)
@@ -695,41 +824,27 @@ func TestSelectFMHAVariant_FP8NotImplemented(t *testing.T) {
 }
 ```
 
-Add the test helpers (`getFusionBackend`, `runFusedFwd`, `makeBias`, `makeI64Scalar`, `assertFiniteBSHD`, `assertFiniteBSHD`) in the same file. `getFusionBackend` probes `BackendFusedScaledDotProductAttention` on a tiny causal bf16 input and `t.Skip`s if it returns `compute.ErrNotImplemented` (mirrors the contract's capability check). Build the graph through the public `compute.Backend`/`compute.Function` API the package already uses in its other `_cuda_test.go` files — grep `git grep -l "GOMLX_BACKEND\|getFusionBackend\|NewBackend" compute/xla/*_test.go` for the established harness and reuse it rather than inventing a new one.
-
-- [ ] **Step 2: Run on trig to verify they fail [trig]**
-
-On trig, branch synced, in the go-xla checkout:
+Run it (Mac):
 
 ```bash
-gputex run "fmha-variants" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHAVariant_.*_trig' -v
+cd /Users/guygrigsby/projects/forks/go-xla
+go test ./compute/xla/ -run TestSelectFMHAVariant_FP8NotImplemented -v
 ```
 
-Expected: FAIL — bias variant emits the bias target but passes no bias operand (cuDNN rejects operand count), or the helpers reference operand-building not yet present. Capture the actual failure.
+Expected: PASS (the S1 selector already returns `ErrNotImplemented` for non-half dtypes).
 
-- [ ] **Step 3: Build the per-variant operand sets in the forward method**
+- [ ] **Step 2: Build the seqlen operand set in the forward method**
 
-In `FusedScaledDotProductAttention`, after casting q/k/v, assemble operands and matching layouts from the variant:
+In `FusedScaledDotProductAttention`, after casting q/k/v, assemble operands and matching layouts. **S1: only the seqlen branch** (bias/dropout branches are added by Task 3b):
 
 ```go
-	// Operand order cuDNN expects: q, k, v, [bias], [seqQ, seqKV], [dropout seed, offset].
+	// Operand order cuDNN expects: q, k, v, [seqQ, seqKV]. [S2] inserts [bias] before seqlens
+	// and appends [dropout seed, offset] after.
 	operands := []compute.Value{q, k, v}
 	operandLayouts := [][]int{{3, 2, 1, 0}, {3, 2, 1, 0}, {3, 2, 1, 0}}
-	if variant.hasBias {
-		bias, err := f.bf16(options.Bias)
-		if err != nil {
-			return nil, nil, err
-		}
-		operands = append(operands, bias)
-		operandLayouts = append(operandLayouts, nil) // bias rank-4 [B,H,S,Skv], row-major
-	}
 	if variant.hasSeqLens {
 		operands = append(operands, options.QuerySeqLen, options.KeyValueSeqLen)
 		operandLayouts = append(operandLayouts, nil, nil) // int32 [B], row-major
-	}
-	if variant.dropoutRate > 0 {
-		operands = append(operands, options.DropoutSeed, options.DropoutOffset)
-		operandLayouts = append(operandLayouts, nil, nil) // int64 scalars
 	}
 	fwdResultLayouts := [][]int{{3, 1, 2, 0}, {2, 1, 0}, {0}}
 	outs, err := f.customCall(variant.fwdTarget, flashFwdBackendConfig(b, h, s, scale, variant),
@@ -748,14 +863,139 @@ already returned `ErrNotImplemented` before reaching here, so this method only r
 
 (rename the local `v` for value to `v2` to avoid shadowing `variant`'s short name if present; keep names consistent with the existing code's `q, k, v`).
 
-- [ ] **Step 4: Mirror the operand set in the backward (VJP) method**
+- [ ] **Step 3: Mirror the seqlen operand set in the backward (VJP) method**
 
-In `FusedScaledDotProductAttentionVJP`, build the backward operands appending the same optional operands after the fixed `q, k, v, softmaxStats, dOut, out`:
+In `FusedScaledDotProductAttentionVJP`, append the seqlen operands after the fixed `q, k, v, softmaxStats, dOut, out`:
 
 ```go
 	operands := []compute.Value{q, k, v, softmaxStats, dOut, out}
 	operandLayouts := [][]int{{3, 2, 1, 0}, {3, 2, 1, 0}, {3, 2, 1, 0}, {2, 1, 0}, {3, 2, 1, 0}, {3, 2, 1, 0}}
-	if variant.hasBias {
+	if variant.hasSeqLens {
+		operands = append(operands, options.QuerySeqLen, options.KeyValueSeqLen)
+		operandLayouts = append(operandLayouts, nil, nil)
+	}
+	bwdResultLayouts := [][]int{{3, 1, 2, 0}, {3, 1, 2, 0}, {3, 1, 2, 0}, {0}}
+	grads, err := f.customCall(variant.bwdTarget, flashBwdBackendConfig(b, h, s, scale, variant),
+		operandLayouts, []shapes.Shape{bhsd, bhsd, bhsd, scratch}, bwdResultLayouts, operands...)
+```
+
+- [ ] **Step 4: Confirm the Mac CPU build/test still green**
+
+```bash
+cd /Users/guygrigsby/projects/forks/go-xla
+go build ./... # pjrt still references old CustomCall; expect only that failure
+go vet ./compute/xla/
+go test ./compute/xla/ -run 'TestSelectFMHAVariant|TestFlashBackendConfigV' -v
+```
+
+Expected: `compute/xla` builds and its CPU tests pass; `pjrt` fails only on `CustomCall` (Task 5). The seqlen execution test runs in Task 4 [cuda] after the gate is relaxed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add compute/xla/flash.go compute/xla/flash_dispatch_test.go
+git commit -m "compute/xla: seqlen fmha operand set; fp8 paused as NotImplemented"
+```
+
+---
+
+## Task 3b [S2]: Bias and dropout operand sets + [cuda] variant exec tests (Contract C)
+
+**Stage 2.** Add the bias and dropout operand branches onto the S1 operand builder (Task 3), and the `[cuda]` per-variant execution tests. Bias adds a `[B,H,S,Skv]` operand before the seqlens; dropout appends the seed/offset operands (and `dropout_rate` is already threaded into backend_config by Task 2b). Depends on compute Stage 2 (`options.Bias` / `options.DropoutSeed` / `options.DropoutOffset`) and the extended `fmhaVariant` (`hasBias` / `dropoutRate`) from Task 2b.
+
+**Execution-order note:** this S2 task is numbered before Task 4 in the document for narrative grouping, but stages gate execution — all of Stage 1 (Tasks 0,1,2,3,4,5) lands and is reviewed first, so Task 4's shared `[cuda]` harness already exists when this task runs.
+
+**Files:**
+- Modify: `compute/xla/flash.go` (insert the bias/dropout branches into both operand builders)
+- Test: `compute/xla/flash_variants_cuda_test.go` (create) — **[cuda]** execution tests, one per wired variant (bias, dropout)
+
+**Interfaces:**
+- Consumes: `fmhaVariant.hasBias`, `fmhaVariant.dropoutRate` (Task 2b); `cfg.Bias`, `cfg.DropoutSeed`, `cfg.DropoutOffset` (Contract A S2); `f.customCall` (Task 1).
+- Produces: the bias/dropout branches inside the two fused-method operand builders.
+
+- [ ] **Step 1: Write the [cuda] variant execution tests**
+
+`compute/xla/flash_variants_cuda_test.go` (no `//go:build` tag needed — it self-skips on non-cuda via `getFusionBackend`; each test is **[cuda]**):
+
+```go
+package xla
+
+import (
+	"testing"
+
+	"github.com/gomlx/compute"
+	"github.com/gomlx/compute/dtypes"
+)
+
+// [cuda] runs under GOMLX_BACKEND=xla:cuda. Each builds a tiny fused-attention graph for one
+// variant and asserts it executes (output finite, right shape). q=k=v=ones makes the softmax
+// uniform so the bias-free output is all ~1.0; with bias the output stays finite.
+func TestFMHAVariant_Bias_cuda(t *testing.T) {
+	be := getFusionBackend(t) // helper from Task 3; skips if backend can't fuse bf16 causal
+	cfg := &compute.ScaledDotProductAttentionConfig{Bias: makeBias(t, be)}
+	out := runFusedFwd(t, be, dtypes.BFloat16, true, cfg)
+	assertFiniteBSHD(t, out)
+}
+
+func TestFMHAVariant_Dropout_cuda(t *testing.T) {
+	be := getFusionBackend(t)
+	cfg := &compute.ScaledDotProductAttentionConfig{
+		DropoutRate:   0.1,
+		DropoutSeed:   makeI64Scalar(t, be, 42),
+		DropoutOffset: makeI64Scalar(t, be, 0),
+	}
+	out := runFusedFwd(t, be, dtypes.BFloat16, true, cfg)
+	assertFiniteBSHD(t, out)
+}
+```
+
+Reuse the shared `[cuda]` harness introduced in Task 4 (`getFusionBackend`, `runFusedFwd`, `assertFiniteBSHD` in `flash_seqlen_cuda_test.go`); add only the bias/dropout-specific helpers here: `makeBias` (a `[B,H,S,Skv]` bf16 node) and `makeI64Scalar` (an int64 scalar node for the dropout seed/offset). Same package, so the Task 4 helpers are visible without redeclaration.
+
+- [ ] **Step 2: Run on the CUDA host to verify they fail [cuda]**
+
+On the CUDA host, branch synced, in the go-xla checkout:
+
+```bash
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHAVariant_.*_cuda' -v
+```
+
+Expected: FAIL — bias variant emits the bias target but passes no bias operand (cuDNN rejects operand count), or the helpers reference operand-building not yet present. Capture the actual failure.
+
+- [ ] **Step 3: Insert the bias/dropout branches into the forward operand builder**
+
+In `FusedScaledDotProductAttention`, extend the Task 3 [S1] operand builder. Bias goes *before* the seqlens; dropout seed/offset go *after* (the cuDNN operand order is q,k,v,[bias],[seqQ,seqKV],[seed,offset]):
+
+```go
+	operands := []compute.Value{q, k, v}
+	operandLayouts := [][]int{{3, 2, 1, 0}, {3, 2, 1, 0}, {3, 2, 1, 0}}
+	if variant.hasBias { // [S2]
+		bias, err := f.bf16(options.Bias)
+		if err != nil {
+			return nil, nil, err
+		}
+		operands = append(operands, bias)
+		operandLayouts = append(operandLayouts, nil) // bias rank-4 [B,H,S,Skv], row-major
+	}
+	if variant.hasSeqLens {
+		operands = append(operands, options.QuerySeqLen, options.KeyValueSeqLen)
+		operandLayouts = append(operandLayouts, nil, nil) // int32 [B], row-major
+	}
+	if variant.dropoutRate > 0 { // [S2]
+		operands = append(operands, options.DropoutSeed, options.DropoutOffset)
+		operandLayouts = append(operandLayouts, nil, nil) // int64 scalars
+	}
+```
+
+(the `f.customCall` call and `fwdResultLayouts` are unchanged from Task 3.)
+
+- [ ] **Step 4: Mirror the bias/dropout branches in the backward (VJP) operand builder**
+
+In `FusedScaledDotProductAttentionVJP`, extend the Task 3 [S1] backward builder the same way:
+
+```go
+	operands := []compute.Value{q, k, v, softmaxStats, dOut, out}
+	operandLayouts := [][]int{{3, 2, 1, 0}, {3, 2, 1, 0}, {3, 2, 1, 0}, {2, 1, 0}, {3, 2, 1, 0}, {3, 2, 1, 0}}
+	if variant.hasBias { // [S2]
 		bias, err := f.bf16(options.Bias)
 		if err != nil { return nil, nil, nil, err }
 		operands = append(operands, bias)
@@ -765,28 +1005,25 @@ In `FusedScaledDotProductAttentionVJP`, build the backward operands appending th
 		operands = append(operands, options.QuerySeqLen, options.KeyValueSeqLen)
 		operandLayouts = append(operandLayouts, nil, nil)
 	}
-	if variant.dropoutRate > 0 {
+	if variant.dropoutRate > 0 { // [S2]
 		operands = append(operands, options.DropoutSeed, options.DropoutOffset)
 		operandLayouts = append(operandLayouts, nil, nil)
 	}
-	bwdResultLayouts := [][]int{{3, 1, 2, 0}, {3, 1, 2, 0}, {3, 1, 2, 0}, {0}}
-	grads, err := f.customCall(variant.bwdTarget, flashBwdBackendConfig(b, h, s, scale, variant),
-		operandLayouts, []shapes.Shape{bhsd, bhsd, bhsd, scratch}, bwdResultLayouts, operands...)
 ```
 
-- [ ] **Step 5: Run the variant tests on trig to verify they pass [trig]**
+- [ ] **Step 5: Run the variant tests on the CUDA host to verify they pass [cuda]**
 
 ```bash
-gputex run "fmha-variants" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHAVariant_.*_trig' -v
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHAVariant_.*_cuda' -v
 ```
 
-Expected: PASS for the variants cuDNN supports on the trig GPU (bias, dropout). Document which variants ran green.
+Expected: PASS for the variants cuDNN supports on the the CUDA host GPU (bias, dropout). Document which variants ran green.
 
 - [ ] **Step 6: Confirm the Mac CPU build/test still green**
 
 ```bash
 cd /Users/guygrigsby/projects/forks/go-xla
-go build ./... # pjrt still references old CustomCall; expect only that failure
+go build ./... # pjrt still references old CustomCall until Task 5
 go vet ./compute/xla/
 ```
 
@@ -796,24 +1033,24 @@ Expected: `compute/xla` builds; `pjrt` fails only on `CustomCall` (Task 5).
 
 ```bash
 git add compute/xla/flash.go compute/xla/flash_variants_cuda_test.go
-git commit -m "compute/xla: per-variant fmha operand sets (bias, dropout, seqlens); fp8 paused as NotImplemented"
+git commit -m "compute/xla: bias and dropout fmha operand sets"
 ```
 
 ---
 
-## Task 4: Seqlen padding masks — relax `flashSupported` (Contract C)
+## Task 4 [S1]: Seqlen padding masks — relax `flashSupported` (Contract C)
 
 Allow seqlens through `flashSupported` and let the variant's `mask_type` (`PADDING` / `PADDING_CAUSAL`) drive masking. The forward/backward operand append for seqlens already landed in Task 3; this task is the gate relaxation plus the seqlen execution test.
 
 **Files:**
 - Modify: `compute/xla/flash.go` (`flashSupported`)
-- Test: `compute/xla/flash_seqlen_cuda_test.go` (create) — **[trig]**
+- Test: `compute/xla/flash_seqlen_cuda_test.go` (create) — **[cuda]**
 
 **Interfaces:**
 - Consumes: `cfg.QuerySeqLen`, `cfg.KeyValueSeqLen` (Contract A); `fmhaVariant.maskType` (Task 2).
 - Produces: relaxed `flashSupported` that accepts seqlens; no new exported names.
 
-- [ ] **Step 1: Write the [trig] seqlen test**
+- [ ] **Step 1: Write the [cuda] seqlen test**
 
 `compute/xla/flash_seqlen_cuda_test.go`:
 
@@ -827,10 +1064,10 @@ import (
 	"github.com/gomlx/compute/dtypes"
 )
 
-// [trig] PADDING_CAUSAL: per-batch lengths shorter than S must mask the padding rows. With
+// [cuda] PADDING_CAUSAL: per-batch lengths shorter than S must mask the padding rows. With
 // q=k=v=ones, masking changes which keys contribute, so the masked output differs from the
 // unmasked all-ones output for the shortened batch element. Runs under xla:cuda.
-func TestFMHA_SeqLenPaddingCausal_trig(t *testing.T) {
+func TestFMHA_SeqLenPaddingCausal_cuda(t *testing.T) {
 	be := getFusionBackend(t)
 	const B, S = 2, 8
 	cfg := &compute.ScaledDotProductAttentionConfig{
@@ -842,12 +1079,12 @@ func TestFMHA_SeqLenPaddingCausal_trig(t *testing.T) {
 }
 ```
 
-Reuse the harness helpers from Task 3; add `makeI32Vec` and `runFusedFwdShaped` (a `runFusedFwd` variant taking B,S) in the Task 3 helper file or here.
+**This [S1] task introduces the shared `[cuda]` test harness** (`getFusionBackend`, `runFusedFwd`, `runFusedFwdShaped`, `makeI32Vec`, `assertFiniteBSHD`) in `flash_seqlen_cuda_test.go` — it is the first `[cuda]` execution test in the S1 stage. `getFusionBackend` probes `BackendFusedScaledDotProductAttention` on a tiny causal bf16 input and `t.Skip`s if it returns `compute.ErrNotImplemented` (mirrors the contract's capability check). Build the graph through the public `compute.Backend`/`compute.Function` API the package already uses in its other `_cuda_test.go` files — grep `git grep -l "GOMLX_BACKEND\|NewBackend" compute/xla/*_test.go` for the established harness and reuse it rather than inventing one. Task 3b [S2] reuses these helpers and adds only the bias/dropout-specific ones (`makeBias`, `makeI64Scalar`).
 
-- [ ] **Step 2: Run on trig to verify it fails [trig]**
+- [ ] **Step 2: Run on the CUDA host to verify it fails [cuda]**
 
 ```bash
-gputex run "fmha-seqlen" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHA_SeqLen.*_trig' -v
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHA_SeqLen.*_cuda' -v
 ```
 
 Expected: FAIL — `flashSupported` returns `ErrNotImplemented` because seqlens are set (current gate only allows nil mask + no extra config), so the fused path is never taken / the test's fusion probe rejects it.
@@ -885,10 +1122,10 @@ func (f *Function) flashSupported(op string, mask compute.Value, numHeads, numKV
 
 (The dtype/variant gate stays in `selectFMHAVariant`; `flashSupported` no longer rejects non-causal, since `NO_MASK` is a valid variant.)
 
-- [ ] **Step 4: Run on trig to verify it passes [trig]**
+- [ ] **Step 4: Run on the CUDA host to verify it passes [cuda]**
 
 ```bash
-gputex run "fmha-seqlen" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHA_SeqLen.*_trig' -v
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHA_SeqLen.*_cuda' -v
 ```
 
 Expected: PASS.
@@ -902,7 +1139,7 @@ git commit -m "compute/xla: allow seqlen padding masks in cuDNN flash path"
 
 ---
 
-## Task 5: Migrate `pjrt/fmha_test.go` to `CustomCallV2` and `IsCUDA`
+## Task 5 [S1]: Migrate `pjrt/fmha_test.go` to `CustomCallV2` and `IsCUDA`
 
 The existing fmha execution test still calls the removed `stablehlo.CustomCall` and gates on `*FlagPluginName != "cuda"`. Update both: call `CustomCallV2` with `[][]int` layouts, and gate on `client.Plugin().IsCUDA()`.
 
@@ -966,10 +1203,10 @@ go test ./pjrt/ -run TestFMHAForwardExecute -v
 
 Expected: SKIP with "fmha is cuDNN-only" (Mac has no cuda plugin). The key result is that it compiles and skips, not fails.
 
-- [ ] **Step 4: Run on trig to verify the execution path passes [trig]**
+- [ ] **Step 4: Run on the CUDA host to verify the execution path passes [cuda]**
 
 ```bash
-gputex run "fmha-fwd-exec" -- env GOMLX_BACKEND=xla:cuda go test ./pjrt/ -run TestFMHAForwardExecute -plugin cuda -v
+env GOMLX_BACKEND=xla:cuda go test ./pjrt/ -run TestFMHAForwardExecute -plugin cuda -v
 ```
 
 Expected: PASS (output all ~1.0, per the test's invariant).
@@ -985,9 +1222,11 @@ git commit -m "compute/xla: migrate fmha pjrt test to CustomCallV2 and IsCUDA ga
 
 ## Verification Gate (Plan 02, from the contract)
 
-Run before declaring plan 02 complete.
+Two gates: run the **Stage 1 gate** before declaring S1 complete (review checkpoint), then the **Stage 2 gate** before declaring S2 complete. Each stage is independently green.
 
-- [ ] **Mac (CPU) — full non-CUDA suite green:**
+### Stage 1 gate (Tasks 0,1,2,3,4,5)
+
+- [ ] **Mac (CPU) — full non-CUDA suite green [S1]:**
 
 ```bash
 cd /Users/guygrigsby/projects/forks/go-xla
@@ -995,31 +1234,57 @@ go build ./...
 go test ./stablehlo/ ./compute/... ./pjrt/ 2>&1 | tail -30
 ```
 
-Expected: build exit 0; all packages pass. CUDA-gated tests (`TestFMHA*`, `TestFMHAVariant_*_trig`, `TestFMHA_SeqLen*_trig`) SKIP on the Mac (no cuda plugin); the `CustomCallV2` rendering unit test (`TestRenderLayouts`) and the dispatch tests (`TestSelectFMHAVariant*`, `TestFlashBackendConfigV`) PASS. No `undefined` / fallback regressions.
+Expected: build exit 0 against the **Stage-1 compute fork** (config has `QuerySeqLen`/`KeyValueSeqLen`, not bias/dropout); all packages pass. CUDA-gated tests (`TestFMHAForwardExecute`, `TestFMHA_SeqLen*_cuda`) SKIP on the Mac; the `CustomCallV2` rendering unit test (`TestRenderLayouts`), the S1 dispatch tests (`TestSelectFMHAVariant_StandardCausal`/`_NoMaskWhenNotCausal`/`_RejectsF32`/`_FP8NotImplemented`, `TestFlashBackendConfigV_MaskTypeFromVariant`) PASS. Verify the S1 `selectFMHAVariant` references no S2 fields: `git grep -n 'cfg.Bias\|cfg.DropoutRate\|cfg.DropoutSeed\|cfg.DropoutOffset' compute/xla/flash.go` must return nothing.
 
-- [ ] **trig (`xla:cuda`) — every variant in the matrix green [trig]:**
-
-On trig, branch synced, native build:
+- [ ] **the CUDA host (`xla:cuda`) — S1 matrix green [cuda][S1]:**
 
 ```bash
-gputex run "fmha-gate" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla ./pjrt -run 'FMHA|Flash' -plugin cuda -v
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla ./pjrt -run 'FMHAForwardExecute|FMHA_SeqLen' -plugin cuda -v
+```
+
+Expected: PASS for standard causal (`TestFMHAForwardExecute`) and seqlen padding-causal (`TestFMHA_SeqLenPaddingCausal_cuda`). No bias/dropout variants in the S1 matrix.
+
+### Stage 2 gate (Tasks 2b, 3b)
+
+- [ ] **Mac (CPU) — S2 dispatch tests green [S2]:**
+
+```bash
+cd /Users/guygrigsby/projects/forks/go-xla
+go build ./...
+go test ./compute/xla/ -run 'TestSelectFMHAVariant|TestFlashBackendConfigV' -v
+```
+
+Expected: build exit 0 against the **Stage-2 compute fork** (config now carries `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset`); the S1 + S2 dispatch tests (`_Bias`, `_Dropout`, `_BiasDropoutPrecedence`, `TestFlashBackendConfigV_DropoutRateFromVariant`) PASS.
+
+- [ ] **the CUDA host (`xla:cuda`) — full variant matrix green [cuda][S2]:**
+
+```bash
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla ./pjrt -run 'FMHA|Flash' -plugin cuda -v
 ```
 
 Expected: PASS for each wired variant (standard causal, bias, dropout, bias+dropout, seqlen padding-causal). Variants unsupported by the installed cuDNN/card `t.Skip` rather than fail — note which ran green. (fp8 is not in this matrix — paused.)
 
-- [ ] **Downstream integration unblocked:** confirm `compute/xla` exports nothing CUDA-specific above the backend (the only public surface change is `stablehlo.CustomCallV2`; `flash.go`'s methods keep their Contract-A signatures). Plan 03 (gomlx) consumes this via the local `replace`.
+- [ ] **Downstream integration unblocked:** confirm `compute/xla` exports nothing CUDA-specific above the backend (the only public surface change is `stablehlo.CustomCallV2`; `flash.go`'s methods keep their Contract-A signatures). Plan 03 (gomlx) consumes this via the local `replace` — its S1 work can start after the Stage 1 gate, without waiting on S2.
 
 ---
 
 ## Self-Review
 
-**Spec coverage** (against contract Contracts B, C and the SCOPE list):
-- Contract B `CustomCallV2` + internal MLIR rendering + remove old `CustomCall` + rewire `ops.go`/`flash.go` → Task 1. CPU layout-rendering unit test → Task 1 Step 1.
-- Contract C variant dispatch (Bias+Dropout / Bias / Dropout / Softmax precedence) → Task 2 (`selectFMHAVariant`). Dtype gate (f16/bf16 only, else ErrNotImplemented incl. paused fp8) → Task 2, pinned by `TestSelectFMHAVariant_FP8NotImplemented` (Task 3, CPU). Per-variant operand sets (bias operand, dropout seed/offset + rate) → Task 3. Seqlen operands + `mask_type` CAUSAL/PADDING/PADDING_CAUSAL/NO_MASK → Task 2 (mask_type) + Task 3 (operands) + Task 4 (gate relaxation). VJP mirrors operands → Task 3 Step 4.
-- Test fix `client.Plugin().IsCUDA()` → Task 5.
-- Task 0 sync is first and non-skippable.
-- [trig] markers present on every cuDNN-execution test; layout-rendering and dispatch tests are CPU-only on the Mac.
+**Stage tagging:** every task carries [S1] or [S2]. S1: Task 0 (sync), 1 (`CustomCallV2`), 2 (selector seam, standard target only), 3 (seqlen operands + fp8 CPU test), 4 (`flashSupported` relax + seqlen [cuda] test), 5 (`IsCUDA` test). S2: Task 2b (bias/dropout selector branches + target consts), 3b (bias/dropout operands + [cuda] exec tests). Matches the contract's decided split exactly: S1 = strict API refactor (no bias/dropout variants), S2 = the variants.
 
-**Placeholder scan:** no TBD/TODO; every code step shows full code. The Task 3/4 test-helper harness defers to the package's existing `_cuda_test.go` harness (grep instruction given) rather than inventing one — this is the one place exact code depends on the synced tree's existing helpers; flagged explicitly so the implementer reuses, not guesses.
+**Cross-stage compile dependency (the load-bearing constraint):** the S1 `selectFMHAVariant` (Task 2) reads only `cfg.QuerySeqLen`/`cfg.KeyValueSeqLen` + `causal`, and the S1 `fmhaVariant` struct has only `fwdTarget`/`bwdTarget`/`maskType`/`hasSeqLens`. It references **none** of `cfg.Bias`/`cfg.DropoutRate`/`cfg.DropoutSeed`/`cfg.DropoutOffset` — those fields are absent from the Stage-1 compute config (Contract A is staged), so any reference would fail to compile. Task 2b [S2] is the single place that adds those reads, the `hasBias`/`dropoutRate` struct fields, and the variant target constants. Both versions of `selectFMHAVariant` are shown in full (Task 2 minimal, Task 2b extended); `flashBackendConfigV` likewise hardcodes `dropout_rate: 0` in S1 and is switched to `formatScale(v.dropoutRate)` in S2. The Stage-1 gate greps `flash.go` to prove no S2 field leaked into S1.
 
-**Type consistency:** `fmhaVariant`, `selectFMHAVariant`, `flashBackendConfigV`, `flashFwdBackendConfig(…, v fmhaVariant)`, `flashBwdBackendConfig(…, v fmhaVariant)`, `dtypeOf`, `renderLayouts`, `CustomCallV2`, and the `customCall` wrapper signature (dropped `apiVersion`, `[][]int` layouts) are used identically across Tasks 1–5. `flashSupported` gains the trailing `options` param in Task 2 and uses it in Task 4 — consistent. dtype names `dtypes.Float16`/`dtypes.BFloat16` (and `dtypes.F8E4M3FN`/`dtypes.F8E5M2`, used only by the fp8-paused NotImplemented test) match the compute module enum.
+**Spec coverage** (against contract Contracts B, C, the SCOPE list, and the Staging section):
+- Contract B `CustomCallV2` + internal MLIR rendering + remove old `CustomCall` + rewire `ops.go`/`flash.go` → Task 1 [S1]. CPU layout-rendering unit test → Task 1 Step 1.
+- Contract C dtype gate (f16/bf16 only, else ErrNotImplemented incl. paused fp8) → Task 2 [S1], pinned by `TestSelectFMHAVariant_FP8NotImplemented` (Task 3 [S1], CPU — it is just the S1 default branch).
+- Contract C `mask_type` CAUSAL/PADDING/PADDING_CAUSAL/NO_MASK from causal+seqlens → Task 2 [S1]; seqlen operands → Task 3 [S1]; gate relaxation + [cuda] seqlen exec → Task 4 [S1].
+- Contract C variant dispatch precedence (Bias+Dropout / Bias / Dropout / Softmax) → Task 2b [S2] (extends `selectFMHAVariant`). Per-variant operand sets (bias operand, dropout seed/offset; `dropout_rate` threaded into config) → Task 2b (config) + Task 3b [S2] (operands). VJP mirrors operands → Task 3 Step 3 [S1] (seqlen) + Task 3b Step 4 [S2] (bias/dropout).
+- Test fix `client.Plugin().IsCUDA()` → Task 5 [S1].
+- Task 0 sync is first and non-skippable; its Step 4 adds a stage check on the integrated compute config.
+- [cuda] markers present on every cuDNN-execution test; layout-rendering and dispatch tests are CPU-only on the Mac. The shared [cuda] harness is introduced in Task 4 [S1] (first S1 [cuda] test); Task 3b [S2] reuses it and adds only `makeBias`/`makeI64Scalar`.
+
+**Placeholder scan:** no TBD/TODO; every code step shows full code. The [cuda] test-helper harness defers to the package's existing `_cuda_test.go` harness (grep instruction given) rather than inventing one — this is the one place exact code depends on the synced tree's existing helpers; flagged explicitly so the implementer reuses, not guesses.
+
+**Type consistency:** `fmhaVariant`, `selectFMHAVariant`, `flashBackendConfigV`, `flashFwdBackendConfig(…, v fmhaVariant)`, `flashBwdBackendConfig(…, v fmhaVariant)`, `dtypeOf`, `renderLayouts`, `CustomCallV2`, and the `customCall` wrapper signature (dropped `apiVersion`, `[][]int` layouts) are used identically across the tasks. `fmhaVariant`/`selectFMHAVariant`/`flashBackendConfigV` deliberately have a smaller S1 shape that S2 widens — the only place a type grows between stages, called out above. `flashSupported` gains the trailing `options` param in Task 2 [S1] and uses it in Task 4 [S1] — consistent. dtype names `dtypes.Float16`/`dtypes.BFloat16` (and `dtypes.F8E4M3FN`/`dtypes.F8E5M2`, used only by the fp8-paused NotImplemented test) match the compute module enum.
+
+**FP8 unchanged:** still paused → `ErrNotImplemented` via the S1 dtype-gate default branch; no F8 target constants, no F8 operand set, handed to janpfeifer per Contract C. The fp8 CPU unit test is [S1] (it tests the default branch that exists from S1).

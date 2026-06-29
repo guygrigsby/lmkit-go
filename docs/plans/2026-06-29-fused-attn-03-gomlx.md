@@ -1,47 +1,59 @@
-# Fused Attention — Plan 03: gomlx Layers (UseFusion, SeqLens, generalized tests)
+# Fused Attention — Plan 03: gomlx Layers (WithFusion, SeqLens, generalized tests)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Delete the CUDA-shaped `FlashAttention` wrapper, expose fusion through the `MultiHeadAttention` builder (`UseFusion`, `WithSeqLens`, `SimpleAttention`), and make the attention tests backend-general instead of `isCUDABackend`-gated, per Contract D.
+**Goal:** Delete the CUDA-shaped `FlashAttention` wrapper, expose fusion through the `MultiHeadAttention` builder (`WithFusion`, `WithSeqLens`) plus a scope-free `SimpleAttention(query, key, value *Node, scale) *Node` package func (the pre-projected drop-in, implemented directly over `InternalFusedOpCaller`, not the builder), make the attention tests backend-general instead of `isCUDABackend`-gated, and (Stage 2) add `WithAttentionBias` and a fused-with-dropout path, per Contract D.
 
-**Architecture:** The fused capability already lives in `attention.Core`'s fused branch (`InternalFusedOpCaller(fused, decomposed)`), so the standalone `FlashAttention` function is redundant and CUDA-flavored — delete it. Add a per-call `UseFusion` gate threaded `builder → doneInternal → Core → fused branch`, a `WithSeqLens` path that populates `compute.ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`, and rewrite the tests to probe each official backend for fusion support (`backendSupportsFusion`) rather than sniff the backend name.
+**Architecture:** The fused capability already lives in `attention.Core`'s fused branch (`InternalFusedOpCaller(fused, decomposed)`), so the standalone `FlashAttention` function is redundant and CUDA-flavored — delete it. Add a per-call `WithFusion` gate threaded `builder → doneInternal → Core` (`Core` carries it as a plain `useFusion bool` param), a `WithSeqLens` path that populates `compute.ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`, and rewrite the tests to probe each official backend for fusion support (`backendSupportsFusion`) rather than sniff the backend name. Stage 2 adds the score-bias variant (`WithAttentionBias` → `config.Bias`) and relaxes the fused branch's `!dropoutActive` gate so it can fuse with dropout.
 
 **Tech Stack:** Go 1.26, `github.com/gomlx/gomlx` (fork, branch `flash-attention`), depends on `github.com/gomlx/compute` (fork, branch `flash-customcall`) and `github.com/gomlx/go-xla` (fork, branch `flash-attention`) via local `replace`.
 
-**Contract:** This plan **produces Contract D** and **consumes Contracts A and C** of `docs/plans/2026-06-29-fused-attn-00-contract.md`. Read the contract first. Global constraints (Go 1.26, no push/no PR, CUDA tests `[trig]` only, fallback-on-`ErrNotImplemented`, voice-rule commits with `attention:` prefix and no Claude attribution) are defined there and apply to every task below; they are not restated per task.
+**Contract:** This plan **produces Contract D** and **consumes Contracts A and C** of `docs/plans/2026-06-29-fused-attn-00-contract.md`. Read the contract first — especially the **Staging** section (Stage 1 = strict API refactor; Stage 2 = variants) and the revised **Contract D** (`WithFusion`, the S2 `WithAttentionBias`, and the S2 dropout-gate relaxation). Global constraints (Go 1.26, no push/no PR, CUDA tests `[cuda]` only, fallback-on-`ErrNotImplemented`, voice-rule commits with `attention:` prefix and no Claude attribution) are defined there and apply to every task below; they are not restated per task.
+
+## Staging
+
+Per the contract's Staging section, this plan ships in two stages, each independently green and reviewable. **Do Stage 1 in full — review — then Stage 2.**
+
+- **[S1] (strict API refactor, no variants):** Tasks 0–7 below. Delete `flash.go`; relocate (do not lose) `repeatKVHeads`; `WithFusion` builder method + `useFusion bool` through `Core`; `WithSeqLens` threading into `compute.ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`; `SimpleAttention`; generalize tests (`backendSupportsFusion` probe, loop `TestOfficialBackends`, `testutil.GetOfficialBackend`); bench fixes (`FinalizeAll`, `for range`, rename `TestFusionThroughput`, single `WithFusion`-toggled code path, flags not env). In S1 the only fused-config fields that exist are `QuerySeqLen/KeyValueSeqLen` (per compute Stage 1).
+- **[S2] (variants — depends on compute Stage 2 fields):** Tasks 8–9 below. Add `WithAttentionBias(bias *Node)` populating `config.Bias` (DISTINCT from the existing `UseProjectionBias`); relax `Core`'s `!dropoutActive` fused-branch gate so it fuses *with* dropout when the backend supports fused dropout, threading rate + seed/offset into the config. These depend on the compute Stage 2 fields (`Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`) existing on `ScaledDotProductAttentionConfig`; do **not** start S2 until plan 01 Stage 2 has landed those fields through the local `replace`.
+
+S1 tasks (0–7) come first; S2 tasks (8–9) come last.
 
 ## Global Constraints
 
 - Repo `/Users/guygrigsby/projects/forks/gomlx`, branch `flash-attention`, module `github.com/gomlx/gomlx`, Go 1.26.
-- This plan depends on Contract A landing first: `compute.ScaledDotProductAttentionConfig` must already carry `QuerySeqLen, KeyValueSeqLen Value` (plan 01). Task 0 verifies the local `replace` points at the updated compute fork and the fields exist; if they do not, stop — plan 01 is not done.
+- This plan depends on Contract A landing first: `compute.ScaledDotProductAttentionConfig` must already carry `QuerySeqLen, KeyValueSeqLen Value` (plan 01 Stage 1). Task 0 verifies the local `replace` points at the updated compute fork and the S1 fields exist; if they do not, stop — plan 01 Stage 1 is not done. The S2 fields (`Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`) are verified separately by Task 8 Step 0.
 - Commit prefix `attention:` (existing scheme in this package). Terse, verb-first, no em/en dashes, no Claude attribution.
-- CUDA execution is `[trig]` only; the Mac CI has no cuDNN. Mark every step whose `Run:` needs `xla:cuda` with **[trig]**. Everything else runs on the Mac `go` (CPU) backend.
+- CUDA execution is `[cuda]` only; the Mac CI has no cuDNN. Mark every step whose `Run:` needs `xla:cuda` with **[cuda]**. Everything else runs on the Mac `go` (CPU) backend.
 - Fallback is the contract: an unsupported-but-valid request returns wrapped `compute.ErrNotImplemented` and falls back to the decomposed path. Never panic on unsupported-but-valid.
 
 ---
 
 ## File Structure
 
-- `ml/layers/attention/flash.go` — **DELETE**. `FlashAttention` is superseded by `Core`'s fused branch; `naiveCausalAttention` and `repeatKVHeads` are test-only helpers that relocate to a test file.
-- `ml/layers/attention/attention.go` — `Core` gains a trailing `useFusion bool` param; the fused branch additionally gates on it and threads a `*compute.ScaledDotProductAttentionConfig` (built from seqlens) into `BackendFusedScaledDotProductAttention`.
-- `ml/layers/attention/multiheadattention.go` — builder gains `useFusion bool` (default true, set in constructor), `querySeqLen/keyValueSeqLen *Node` fields, methods `UseFusion`, `WithSeqLens`, and package function `SimpleAttention`; `doneInternal` builds the config and passes `useFusion` to `Core`.
-- `ml/layers/attention/fusion_test.go` — **NEW**. Houses the relocated reference helpers (`naiveCausalAttention`, `naiveGQAReference`, `repeatKVHeads`), the `backendSupportsFusion` probe, the CPU-testable builder/wiring tests, and the backend-general parity tests (loop `TestOfficialBackends`, skip when unsupported).
-- `ml/layers/attention/flash_test.go` — **DELETE** (its content moves to `fusion_test.go`, generalized).
-- `ml/layers/attention/flash_bench_test.go` → rename to `ml/layers/attention/fusion_bench_test.go`; `attentionStep` toggles fusion via `UseFusion`, not a separate code path; env-var probe gating becomes Go test flags.
-- `support/testutil/testutil.go` — add `GetOfficialBackend(name string) compute.Backend`.
+- `ml/layers/attention/flash.go` — **DELETE** [S1]. The `FlashAttention` function is superseded by `Core`'s fused branch and the scope-free `SimpleAttention`. Its decomposed half, `naiveCausalAttention`, is a **runtime** dependency of `SimpleAttention` and is RETAINED in the new non-test `fusion.go` (do NOT move it to a `_test.go`); only the genuinely test-only helpers (`naiveGQAReference`, `repeatKVHeads`) move to a test file.
+- `ml/layers/attention/fusion.go` — **NEW** [S1], non-test. Houses the retained runtime `naiveCausalAttention` (Task 1) and the scope-free package function `SimpleAttention(query, key, value *Node, scale float64) *Node` (Task 5), which routes through `InternalFusedOpCaller(fused, decomposed)` directly — not the `MultiHeadAttention` builder.
+- `ml/layers/attention/attention.go` — `Core` gains a trailing `useFusion bool` param [S1] and a trailing `*compute.ScaledDotProductAttentionConfig` param [S1]; the fused branch additionally gates on `useFusion` and threads the config into `BackendFusedScaledDotProductAttention`. Stage 2 relaxes the `!dropoutActive` gate.
+- `ml/layers/attention/multiheadattention.go` — builder gains `useFusion bool` (default true, set in constructor), `querySeqLen/keyValueSeqLen *Node` fields, methods `WithFusion`, `WithSeqLens` [S1]; later `attentionBias *Node` + `WithAttentionBias` [S2]; `doneInternal` builds the config and passes `useFusion` to `Core`. (`SimpleAttention` does NOT live here — it is a scope-free package func in `fusion.go`, not a builder method.)
+- `ml/layers/attention/fusion_test.go` — **NEW** [S1]. Houses the relocated test-only helpers (`naiveGQAReference`, `repeatKVHeads`), the `backendSupportsFusion` probe, the CPU-testable builder/wiring tests, and the backend-general parity tests (loop `TestOfficialBackends`, skip when unsupported). (`naiveCausalAttention` is NOT here — it is runtime, in `fusion.go`.)
+- `ml/layers/attention/flash_test.go` — **DELETE** [S1] (its content moves to `fusion_test.go`, generalized).
+- `ml/layers/attention/flash_bench_test.go` → rename to `ml/layers/attention/fusion_bench_test.go` [S1]; `attentionStep` toggles fusion via `WithFusion`, not a separate code path; env-var probe gating becomes Go test flags.
+- `support/testutil/testutil.go` — add `GetOfficialBackend(name string) compute.Backend` [S1].
+
+**Core call-site blast radius (real count, grepped):** exactly **one production caller** — `multiheadattention.go:446` — plus **15 test calls** in `attention_test.go` (lines 28, 36, 79, 101, 102, 132, 161, 188, 228, 230, 286, 287, 323, 324, 366) and the new `fusion_test.go` calls. Changing `Core`'s signature is small: one production line, fifteen test lines, plus the new tests this plan adds.
 
 ---
 
-## Task 0: Verify Contract A landed (no code)
+## Task 0: Verify Contract A (Stage 1) landed (no code) [S1]
 
 **Files:**
 - Inspect: `/Users/guygrigsby/projects/forks/gomlx/go.mod` (the `replace github.com/gomlx/compute` directive)
 - Inspect: the compute fork `fused_ops.go` reachable through that replace.
 
 **Interfaces:**
-- Consumes (Contract A): `compute.ScaledDotProductAttentionConfig` with fields `QuerySeqLen, KeyValueSeqLen compute.Value`.
+- Consumes (Contract A, Stage 1): `compute.ScaledDotProductAttentionConfig` with fields `QuerySeqLen, KeyValueSeqLen compute.Value`.
 
-- [ ] **Step 1: Confirm the local replace and the fields exist**
+- [ ] **Step 1: Confirm the local replace and the S1 fields exist**
 
 Run:
 ```bash
@@ -49,48 +61,60 @@ cd /Users/guygrigsby/projects/forks/gomlx
 grep -n 'replace.*gomlx/compute' go.mod
 go doc github.com/gomlx/compute.ScaledDotProductAttentionConfig
 ```
-Expected: `go.mod` has a `replace github.com/gomlx/compute => /Users/guygrigsby/projects/forks/compute` (or equivalent local path), and `go doc` lists `QuerySeqLen Value` and `KeyValueSeqLen Value` on the struct.
+Expected: `go.mod` has a `replace github.com/gomlx/compute => /Users/guygrigsby/projects/forks/compute` (or equivalent local path), and `go doc` lists `QuerySeqLen Value` and `KeyValueSeqLen Value` on the struct. (The S2 fields `Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset` may or may not be present yet — they are not required for Stage 1; Task 8 verifies them.)
 
 - [ ] **Step 2: Decision gate**
 
-If the replace is missing or the fields are absent, STOP and report: "plan 01 (compute) is not integrated; cannot proceed with plan 03." Otherwise continue to Task 1. (No commit — this is a read-only gate.)
+If the replace is missing or the S1 fields are absent, STOP and report: "plan 01 Stage 1 (compute) is not integrated; cannot proceed with plan 03 Stage 1." Otherwise continue to Task 1. (No commit — this is a read-only gate.)
 
 ---
 
-## Task 1: Relocate test-only helpers, then delete flash.go
+## Task 1: Split flash.go helpers — retain the runtime ones in-package, move test-only ones to tests, delete the wrapper [S1]
 
-This task moves the three helpers `FlashAttention`'s file shares with the tests (`naiveCausalAttention`, `naiveGQAReference`, `repeatKVHeads`) into a new test file, then deletes `flash.go` and `flash_test.go`. `naiveGQAReference` is already test-only (it lives in `flash_test.go`); it moves verbatim. `naiveCausalAttention` and `repeatKVHeads` currently live in `flash.go` (non-test) but are referenced only by tests once `FlashAttention` is gone — verify that and relocate them to the test file so production code carries nothing CUDA-shaped.
+**CRITICAL — do not delete a runtime dependency.** `naiveCausalAttention` is **not** test-only after this refactor: scope-free `SimpleAttention` (Task 5) calls it at runtime as its decomposed fallback. It MUST be RETAINED IN A NON-TEST FILE (`ml/layers/attention/fusion.go`), not moved to a `_test.go` file. Only genuinely test-only helpers move to the test file.
 
-**Why deletion loses no behavior:** `FlashAttention(q,k,v,scale)` did exactly three things — validate rank-4 / equal-head shapes, repeat KV heads for GQA, then call `BackendFusedScaledDotProductAttention(..., causal=true, options=nil)` with a `naiveCausalAttention` fallback on `compute.IsNotImplemented`. `Core`'s fused branch (`attention.go:268-280`) already calls `BackendFusedScaledDotProductAttention` through `InternalFusedOpCaller`, which performs the identical `ErrNotImplemented → decomposed` fallback, and `Core`'s decomposed path already handles GQA via `reshapeQueryForGQA` (no `repeatKVHeads` needed in production). So every capability `FlashAttention` provided is reachable through `MultiHeadAttention(...).UseCausalMask().Done()` / `Core(..., useCausalMask=true, ...)`. The deletion only removes a redundant, CUDA-named entry point.
+This task: (a) create non-test `ml/layers/attention/fusion.go` holding `naiveCausalAttention` (the runtime decomposed reference/fallback that `SimpleAttention` depends on); (b) move the genuinely test-only helpers `naiveGQAReference` and `repeatKVHeads` into `fusion_test.go`; (c) delete the `FlashAttention` function and `flash.go`/`flash_test.go`.
+
+**Why the split, not a blanket move-to-tests:**
+- `naiveCausalAttention` — **runtime.** `SimpleAttention`'s decomposed closure (Task 5) calls it on every backend, and it is the `ErrNotImplemented` fallback on CPU. Putting it in a `_test.go` file would make the non-test build fail (`undefined: naiveCausalAttention`). Keep it in `fusion.go`.
+- `repeatKVHeads` — **test-only.** `SimpleAttention` requires the caller to have already repeated KV to nH (equal heads), and `Core`'s decomposed path uses `reshapeQueryForGQA`, not `repeatKVHeads`. So nothing in production references it; it survives only to pin the GQA grouping order in `TestRepeatKVHeads` (Task 6) and to shape the bench. Move it to `fusion_test.go`. **It must be preserved (relocated, not deleted).**
+- `naiveGQAReference` — **test-only**, already lives in `flash_test.go`. Move verbatim to `fusion_test.go`.
+
+**Why deleting `FlashAttention` loses no behavior:** `FlashAttention(q,k,v,scale)` did three things — validate rank-4/equal-head shapes, repeat KV heads for GQA, then call `BackendFusedScaledDotProductAttention(..., causal=true, options=nil)` with a `naiveCausalAttention` fallback on `compute.IsNotImplemented`. Its two remaining consumers are both covered: `Core`'s fused branch (`attention.go:268-280`) calls the same backend op through `InternalFusedOpCaller` (identical fallback) with GQA via `reshapeQueryForGQA` in the decomposed path; and the new scope-free `SimpleAttention` (Task 5) is the pre-projected/equal-head drop-in, also over `InternalFusedOpCaller`. The deletion only removes the redundant, CUDA-named entry point — its decomposed half (`naiveCausalAttention`) lives on in `fusion.go`.
 
 **Files:**
-- Create: `ml/layers/attention/fusion_test.go` (helpers only, for now)
+- Create: `ml/layers/attention/fusion.go` (non-test; retains `naiveCausalAttention`; `SimpleAttention` is added to this same file in Task 5).
+- Create: `ml/layers/attention/fusion_test.go` (test-only helpers `naiveGQAReference`, `repeatKVHeads`).
 - Delete: `ml/layers/attention/flash.go`
 - Delete: `ml/layers/attention/flash_test.go`
-- Inspect: `ml/layers/attention/flash_bench_test.go` (still references `naiveCausalAttention`, `repeatKVHeads` — keeps compiling because they now live in `fusion_test.go`, same package).
+- Inspect: `ml/layers/attention/flash_bench_test.go` (still references `naiveCausalAttention`/`repeatKVHeads` — keeps compiling because both stay in-package: `naiveCausalAttention` in `fusion.go`, `repeatKVHeads` in `fusion_test.go`, same package `attention`).
 
 **Interfaces:**
-- Produces (test-internal, same package `attention`):
-  - `func naiveCausalAttention(query, key, value *Node, scale float64) *Node`
+- Produces (non-test, package `attention`, in `fusion.go`):
+  - `func naiveCausalAttention(query, key, value *Node, scale float64) *Node` — **runtime** (SimpleAttention's decomposed fallback).
+- Produces (test-internal, in `fusion_test.go`):
   - `func naiveGQAReference(query, key, value *Node, numKVHeads int, scale float64) *Node`
   - `func repeatKVHeads(x *Node, group int) *Node`
 - Removes: `func FlashAttention(query, key, value *Node, scale float64) *Node` (no production caller; grep confirmed zero usages outside the deleted files).
 
-- [ ] **Step 1: Write `fusion_test.go` with the relocated helpers**
+- [ ] **Step 1: Create non-test `fusion.go` with the runtime `naiveCausalAttention`**
 
-Create `ml/layers/attention/fusion_test.go`:
+Create `ml/layers/attention/fusion.go` (this is where Task 5 adds `SimpleAttention`; the imports are sized for both):
 ```go
 // Copyright 2023-2026 The GoMLX Authors. SPDX-License-Identifier: Apache-2.0
 
 package attention
 
 import (
+	"github.com/gomlx/compute"
 	"github.com/gomlx/compute/dtypes"
 	. "github.com/gomlx/gomlx/core/graph"
+	. "github.com/gomlx/gomlx/support/exceptions"
 )
 
-// naiveCausalAttention is the decomposed reference and fallback: softmax(scale*QK^T + causal)*V
-// in float32. query/key/value are [B,S,H,D] with equal heads.
+// naiveCausalAttention is the decomposed reference and runtime fallback: softmax(scale*QK^T + causal)*V
+// in float32. query/key/value are [B,S,H,D] with equal heads. SimpleAttention uses it as the
+// decomposed closure for InternalFusedOpCaller, so this is production code, not test-only.
 func naiveCausalAttention(query, key, value *Node, scale float64) *Node {
 	g := query.Graph()
 	q := ConvertDType(query, dtypes.Float32)
@@ -104,6 +128,21 @@ func naiveCausalAttention(query, key, value *Node, scale float64) *Node {
 	attn := MaskedSoftmax(scores, causal, -1)
 	return Einsum("bhqk,bkhd->bqhd", attn, v)
 }
+```
+(The `compute` and `exceptions` imports are unused until Task 5 adds `SimpleAttention` to this file; if Task 1 is committed before Task 5, drop those two import lines now and Task 5 re-adds them, OR add `SimpleAttention` in the same commit. Either is fine — the file is staged across both tasks.)
+
+- [ ] **Step 2: Create `fusion_test.go` with the test-only helpers**
+
+Create `ml/layers/attention/fusion_test.go`:
+```go
+// Copyright 2023-2026 The GoMLX Authors. SPDX-License-Identifier: Apache-2.0
+
+package attention
+
+import (
+	"github.com/gomlx/compute/dtypes"
+	. "github.com/gomlx/gomlx/core/graph"
+)
 
 // naiveGQAReference computes grouped-query attention independently of repeatKVHeads: it splits the
 // query heads into (numKVHeads, group) and contracts each group against its kv head, so it is a
@@ -127,6 +166,8 @@ func naiveGQAReference(query, key, value *Node, numKVHeads int, scale float64) *
 
 // repeatKVHeads expands key/value for grouped-query attention: [B,S,nKV,D] -> [B,S,nKV*group,D],
 // repeating each kv head group times contiguously, so output head h uses kv head h/group.
+// Test-only: production GQA goes through Core's reshapeQueryForGQA, and SimpleAttention's callers
+// repeat KV themselves; this survives only to pin the grouping order in TestRepeatKVHeads.
 func repeatKVHeads(x *Node, group int) *Node {
 	d := x.Shape().Dimensions
 	b, s, nKV, dim := d[0], d[1], d[2], d[3]
@@ -136,7 +177,7 @@ func repeatKVHeads(x *Node, group int) *Node {
 }
 ```
 
-- [ ] **Step 2: Delete flash.go and flash_test.go**
+- [ ] **Step 3: Delete flash.go and flash_test.go**
 
 Run:
 ```bash
@@ -144,40 +185,43 @@ cd /Users/guygrigsby/projects/forks/gomlx
 git rm ml/layers/attention/flash.go ml/layers/attention/flash_test.go
 ```
 
-- [ ] **Step 3: Verify the package still builds and the bench file still compiles**
+- [ ] **Step 4: Verify the package still builds and the bench file still compiles**
 
 Run: `go build ./ml/layers/attention/ && go vet ./ml/layers/attention/`
-Expected: PASS. (`flash_bench_test.go` references `naiveCausalAttention`/`repeatKVHeads`, now satisfied from `fusion_test.go`; `FlashAttention` is referenced only by `flash_bench_test.go:25` — that line is fixed in Task 6, so vet of the test build may flag it. If `go vet` reports `undefined: FlashAttention` in `flash_bench_test.go`, that is expected and resolved in Task 6; the non-test build `go build ./ml/layers/attention/` must pass cleanly now.)
+Expected: PASS for `go build` (the non-test build now carries `naiveCausalAttention` in `fusion.go`). `flash_bench_test.go` references `naiveCausalAttention`/`repeatKVHeads` (both in-package now) and `FlashAttention` (referenced only by `flash_bench_test.go:25` — fixed in Task 7). If `go vet` reports `undefined: FlashAttention` in `flash_bench_test.go`, that is expected and resolved in Task 7; the non-test build `go build ./ml/layers/attention/` must pass cleanly now.
 
-- [ ] **Step 4: Confirm no stray FlashAttention references remain in production code**
+- [ ] **Step 5: Confirm no stray FlashAttention references remain in production code, and naiveCausalAttention is in a non-test file**
 
-Run: `grep -rn 'FlashAttention' ml/ core/ --include='*.go' | grep -v '_test.go'`
-Expected: no output (empty).
+Run:
+```bash
+grep -rn 'FlashAttention' ml/ core/ --include='*.go' | grep -v '_test.go'
+grep -l 'func naiveCausalAttention' ml/layers/attention/*.go
+```
+Expected: first grep empty; second prints `ml/layers/attention/fusion.go` (NOT a `_test.go` file).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /Users/guygrigsby/projects/forks/gomlx
-git add ml/layers/attention/fusion_test.go
-git commit -m "attention: delete FlashAttention wrapper; relocate reference helpers to test file
+git add ml/layers/attention/fusion.go ml/layers/attention/fusion_test.go
+git commit -m "attention: delete FlashAttention wrapper; retain naiveCausalAttention in-package
 
-Core's fused branch already calls BackendFusedScaledDotProductAttention with
-the same ErrNotImplemented fallback, and Core's decomposed path handles GQA via
-reshapeQueryForGQA, so the CUDA-named FlashAttention entry point was redundant.
-Move naiveCausalAttention, naiveGQAReference and repeatKVHeads (now test-only)
-into fusion_test.go."
+naiveCausalAttention is SimpleAttention's runtime decomposed fallback, so it moves
+to a non-test file (fusion.go), NOT a _test.go. The test-only helpers naiveGQAReference
+and repeatKVHeads move to fusion_test.go. FlashAttention is gone: Core's fused branch
+and the scope-free SimpleAttention cover its behavior through InternalFusedOpCaller."
 ```
 
 ---
 
-## Task 2: Thread `useFusion` through Core
+## Task 2: Thread `useFusion` through Core [S1]
 
-Add the trailing `useFusion bool` param to `Core` (appended after `scoreSoftCap` — keeps every existing positional arg stable). The fused branch additionally gates on `useFusion`; when false, `Core` always takes the decomposed path. Update both production call sites and all `attention_test.go` / bench call sites.
+Add the trailing `useFusion bool` param to `Core` (appended after `scoreSoftCap` — keeps every existing positional arg stable). The fused branch additionally gates on `useFusion`; when false, `Core` always takes the decomposed path. Update the single production call site and all `attention_test.go` call sites.
 
 **Files:**
 - Modify: `ml/layers/attention/attention.go:182-282` (signature + fused-branch gate)
-- Modify: `ml/layers/attention/multiheadattention.go:446` (sole production `Core` caller — pass `true` for now; Task 3 threads the real builder value)
-- Modify: `ml/layers/attention/attention_test.go` (12 `Core(...)` calls — append `true`)
+- Modify: `ml/layers/attention/multiheadattention.go:446` (the **sole** production `Core` caller — pass `true` for now; Task 3 threads the real builder value)
+- Modify: `ml/layers/attention/attention_test.go` (15 `Core(scope ...)` calls — append `true`)
 - Modify: `ml/layers/attention/flash_bench_test.go` (no direct `Core` call today; left untouched here)
 
 **Interfaces:**
@@ -186,8 +230,9 @@ Add the trailing `useFusion bool` param to `Core` (appended after `scoreSoftCap`
   func Core(scope *model.Scope, query, key, value *Node, scale float64, attentionMask *Node, dropoutRate *Node,
       layout AxesLayout, useCausalMask, wantCoefficients bool, scoreSoftCap float64, useFusion bool) (output, coefficients *Node)
   ```
+  Note: `Core` carries the toggle as a plain `useFusion bool` param. The builder-facing method is `WithFusion` (Task 3) — the param name `useFusion` is internal and stays a bool.
 
-- [ ] **Step 1: Write a failing test for the UseFusion(false) decomposed gate**
+- [ ] **Step 1: Write a failing test for the WithFusion(false) decomposed gate**
 
 Add to `ml/layers/attention/fusion_test.go` (imports: add `"testing"`, `"github.com/gomlx/gomlx/core/tensors"`, `"github.com/gomlx/gomlx/ml/model"`, `"github.com/gomlx/gomlx/support/testutil"`, `"github.com/stretchr/testify/require"`; the existing `dtypes` and graph dot-import stay):
 ```go
@@ -257,11 +302,10 @@ In `ml/layers/attention/multiheadattention.go:446-447`, append `true` (replaced 
 
 - [ ] **Step 5: Update all `attention_test.go` Core call sites**
 
-Append `, true` (or `, false` where the test name asks for decomposed — keep behavior identical to today, so append `true` everywhere to preserve the prior default of attempting fusion) to each of the 12 `Core(...)` calls at `attention_test.go` lines 28, 36, 79, 101, 102, 132, 161, 188, 228, 230, 286, 287, 323, 324, 366. Example, line 28:
+Append `, true` to each of the **15** `Core(scope ...)` calls at `attention_test.go` lines 28, 36, 79, 101, 102, 132, 161, 188, 228, 230, 286, 287, 323, 324, 366. Keep behavior identical to today, so append `true` everywhere to preserve the prior default of attempting fusion. For the calls that already pass `wantCoefficients=true` (lines 188, 230, 287, 324), the trailing arg is irrelevant to behavior but still required — append `true`. Example, line 28:
 ```go
 		bhsdOut, _ := Core(scope, q, k, v, scale, nil, nil, LayoutBHSD, false, false, 0.0, true)
 ```
-For the two `decomposedOutput`/coefficient calls that already pass `wantCoefficients=true` (lines 230, 287, 324, 188), the trailing arg is irrelevant to behavior but still required — append `true`.
 
 Run after editing: `grep -n 'Core(scope' ml/layers/attention/attention_test.go` and confirm every line ends with `, true)`.
 
@@ -273,7 +317,7 @@ Expected: PASS.
 - [ ] **Step 7: Run the whole package to confirm no call site was missed**
 
 Run: `go test ./ml/layers/attention/`
-Expected: PASS (or, if `flash_bench_test.go` still references `FlashAttention`, a compile error confined to that file — fix is Task 6; if so, run `go test ./ml/layers/attention/ -run 'TestCore|TestAxes'` to scope around it and confirm the non-bench tests pass).
+Expected: PASS (or, if `flash_bench_test.go` still references `FlashAttention`, a compile error confined to that file — fix is Task 7; if so, run `go test ./ml/layers/attention/ -run 'TestCore|TestAxes'` to scope around it and confirm the non-bench tests pass).
 
 - [ ] **Step 8: Commit**
 
@@ -289,18 +333,18 @@ stays the global override; useFusion is the per-call override."
 
 ---
 
-## Task 3: Builder `UseFusion` (default true)
+## Task 3: Builder `WithFusion` (default true) [S1]
 
-Add the `useFusion` field defaulting to `true` (set in the `MultiHeadAttention` constructor), the `UseFusion(enabled bool)` builder method, and thread the field into the `Core` call in `doneInternal`.
+Add the `useFusion` field defaulting to `true` (set in the `MultiHeadAttention` constructor), the `WithFusion(enabled bool)` builder method, and thread the field into the `Core` call in `doneInternal`. The method is `WithFusion` to match the existing `WithX` convention (`WithPreProjected`, `WithQueryKeyScale`, `WithDropout`) and Jan's inline comment; the underlying field/param stays `useFusion bool`.
 
 **Files:**
-- Modify: `ml/layers/attention/multiheadattention.go` (struct field ~32-76, constructor ~142-156, new method near other `With*`/`Use*` methods, `doneInternal` Core call ~446)
+- Modify: `ml/layers/attention/multiheadattention.go` (struct field ~32-76, constructor ~142-156, new method near other `With*` methods, `doneInternal` Core call ~446)
 - Test: `ml/layers/attention/fusion_test.go`
 
 **Interfaces:**
 - Produces (Contract D):
   ```go
-  func (b *MultiHeadAttentionBuilder) UseFusion(enabled bool) *MultiHeadAttentionBuilder
+  func (b *MultiHeadAttentionBuilder) WithFusion(enabled bool) *MultiHeadAttentionBuilder
   ```
 - Consumes: `Core(..., useFusion bool)` from Task 2.
 
@@ -308,12 +352,11 @@ Add the `useFusion` field defaulting to `true` (set in the `MultiHeadAttention` 
 
 Add to `ml/layers/attention/fusion_test.go`:
 ```go
-// TestBuilderUseFusionDefaultsTrue pins that the builder defaults useFusion to true and that
-// UseFusion(false) flips it. Builder-level, no execution needed — inspects the field through a
-// Done() run on CPU and asserts the output matches the decomposed reference either way (CPU has
-// no fused causal kernel, so both equal the reference; the test guards the wiring compiles and
-// the default is true).
-func TestBuilderUseFusionDefaultsTrue(t *testing.T) {
+// TestBuilderWithFusionDefaultsTrue pins that the builder defaults useFusion to true and that
+// WithFusion(false) flips it. Builder-level — inspects the field through a Done() run on CPU and
+// asserts the output shape is correct either way (CPU has no fused causal kernel, so both equal
+// the reference; the test guards the wiring compiles and the default is true).
+func TestBuilderWithFusionDefaultsTrue(t *testing.T) {
 	backend := testutil.BuildTestBackend()
 	const B, S, H, D = 1, 16, 2, 8
 	x := tensors.FromFlatDataAndDimensions(randFlat(B*S*(H*D), 1), B, S, H*D)
@@ -321,9 +364,9 @@ func TestBuilderUseFusionDefaultsTrue(t *testing.T) {
 	store := model.NewStore()
 	exec := model.MustNewExec(backend, store, func(scope *model.Scope, in *Node) []*Node {
 		def := SelfAttention(scope.In("def"), in, H, D).UseCausalMask().Done()
-		off := SelfAttention(scope.In("off"), in, H, D).UseCausalMask().UseFusion(false).Done()
-		// Same weights are not shared across scopes, so compare shapes only: both must produce
-		// [B,S,H*D] and be finite. The behavioral on/off equivalence is covered by Task 2.
+		off := SelfAttention(scope.In("off"), in, H, D).UseCausalMask().WithFusion(false).Done()
+		// Weights are not shared across scopes, so compare shapes only: both must produce
+		// [B,S,H*D]. The behavioral on/off equivalence is covered by Task 2.
 		return []*Node{def, off}
 	})
 	out := exec.MustCall(x)
@@ -334,8 +377,8 @@ func TestBuilderUseFusionDefaultsTrue(t *testing.T) {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `go test ./ml/layers/attention/ -run TestBuilderUseFusionDefaultsTrue`
-Expected: FAIL — compile error `b.UseFusion undefined`.
+Run: `go test ./ml/layers/attention/ -run TestBuilderWithFusionDefaultsTrue`
+Expected: FAIL — compile error `b.WithFusion undefined`.
 
 - [ ] **Step 3: Add the field, default, method, and thread into doneInternal**
 
@@ -354,10 +397,10 @@ In the `MultiHeadAttention` constructor (the `b := &MultiHeadAttentionBuilder{..
 ```
 Add the method next to `WithQueryKeyScale` (~line 330):
 ```go
-// UseFusion controls whether the backend fused scaled-dot-product-attention path may be used.
+// WithFusion controls whether the backend fused scaled-dot-product-attention path may be used.
 // Default is true. When false, Core always takes the decomposed path (useful for debugging or
 // for configs the fused kernel does not support). GOMLX_FUSION is a separate global override.
-func (b *MultiHeadAttentionBuilder) UseFusion(enabled bool) *MultiHeadAttentionBuilder {
+func (b *MultiHeadAttentionBuilder) WithFusion(enabled bool) *MultiHeadAttentionBuilder {
 	b.useFusion = enabled
 	return b
 }
@@ -370,7 +413,7 @@ In `doneInternal`, change the `Core` call (~446) from `b.scoreSoftCap, true)` to
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `go test ./ml/layers/attention/ -run TestBuilderUseFusionDefaultsTrue`
+Run: `go test ./ml/layers/attention/ -run TestBuilderWithFusionDefaultsTrue`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -378,17 +421,17 @@ Expected: PASS.
 ```bash
 cd /Users/guygrigsby/projects/forks/gomlx
 git add ml/layers/attention/multiheadattention.go ml/layers/attention/fusion_test.go
-git commit -m "attention: add MultiHeadAttentionBuilder.UseFusion (default true)
+git commit -m "attention: add MultiHeadAttentionBuilder.WithFusion (default true)
 
-Constructor seeds useFusion=true; UseFusion(false) forces the decomposed path
-through Core."
+Constructor seeds useFusion=true; WithFusion(false) forces the decomposed path
+through Core. Method name follows the WithX builder convention."
 ```
 
 ---
 
-## Task 4: Builder `WithSeqLens` → config QuerySeqLen/KeyValueSeqLen
+## Task 4: Builder `WithSeqLens` → config QuerySeqLen/KeyValueSeqLen [S1]
 
-Add `querySeqLen`/`keyValueSeqLen *Node` fields and `WithSeqLens`, mutually exclusive with an explicit `queryKeyMatrixMask`. When set, `doneInternal` builds a `*compute.ScaledDotProductAttentionConfig{QuerySeqLen, KeyValueSeqLen}` and passes it into the fused branch. Threading the config requires `Core` to accept and forward it.
+Add `querySeqLen`/`keyValueSeqLen *Node` fields and `WithSeqLens`, mutually exclusive with an explicit `queryKeyMatrixMask`. When set, `doneInternal` builds a `*compute.ScaledDotProductAttentionConfig{QuerySeqLen, KeyValueSeqLen}` and passes it into the fused branch. Threading the config requires `Core` to accept and forward it. **Stage 1 only populates `QuerySeqLen/KeyValueSeqLen`** — the only fused-config fields that exist at this stage (per compute Stage 1). `Bias`/dropout config plumbing is Stage 2 (Tasks 8–9), and those compute fields do not exist until compute Stage 2.
 
 **Files:**
 - Modify: `ml/layers/attention/attention.go` (Core: accept an optional config and pass it to `BackendFusedScaledDotProductAttention` instead of the hardcoded `nil` at ~272)
@@ -400,14 +443,13 @@ Add `querySeqLen`/`keyValueSeqLen *Node` fields and `WithSeqLens`, mutually excl
   ```go
   func (b *MultiHeadAttentionBuilder) WithSeqLens(querySeqLen, keyValueSeqLen *Node) *MultiHeadAttentionBuilder
   ```
-- Consumes (Contract A): `compute.ScaledDotProductAttentionConfig{ QuerySeqLen, KeyValueSeqLen compute.Value }`.
+- Consumes (Contract A, Stage 1): `compute.ScaledDotProductAttentionConfig{ QuerySeqLen, KeyValueSeqLen compute.Value }`.
 - Internal change: `Core` gains a trailing `*compute.ScaledDotProductAttentionConfig` param (appended after `useFusion`):
   ```go
   func Core(..., scoreSoftCap float64, useFusion bool, fusedConfig *compute.ScaledDotProductAttentionConfig) (output, coefficients *Node)
   ```
-  The `*Node` builder seqlens convert to `compute.Value` via `node.outputOps[0]`-equivalent — but `Core` works in `*Node` land, so the config it forwards carries `compute.Value`. Build the config in `doneInternal` (which has the `*Node` seqlens) and pass the already-`compute.Value`-typed config down. See Step 3 for the exact conversion using the seqlen `*Node`s' backend values.
 
-**Note on the *Node → compute.Value boundary:** `compute.ScaledDotProductAttentionConfig.QuerySeqLen` is a `compute.Value`, but the builder holds `*Node`. The graph package converts a `*Node` to its backend `compute.Value` via its `outputOps[0]`, which is unexported. The clean route is to keep the seqlen tensors as graph `*Node`s and pass them as the `mask`-style operands — but Contract A specifies they ride in the *config*, not as operands. Resolve this by having `doneInternal` construct the config inside the `core/graph` package boundary: add a tiny exported helper in `core/graph` that builds the config from `*Node` seqlens. See Step 3.
+**Note on the *Node → compute.Value boundary:** `compute.ScaledDotProductAttentionConfig.QuerySeqLen` is a `compute.Value`, but the builder holds `*Node`. The graph package converts a `*Node` to its backend `compute.Value` via its `outputOps[0]`, which is unexported. Resolve this by having `doneInternal` construct the config through a tiny exported helper in `core/graph` that builds the config from `*Node` seqlens. See Step 3.
 
 - [ ] **Step 1: Write the failing validation test (CPU)**
 
@@ -461,13 +503,15 @@ func NewSeqLenAttentionConfig(querySeqLen, keyValueSeqLen *Node) *compute.Scaled
 	return cfg
 }
 ```
+(Confirm `outputOps` is the field name on `*Node` in this fork — grep `outputOps` in `core/graph/fused_ops.go`; it is used there, so the helper compiles in the same package.)
+
 In `ml/layers/attention/attention.go`, append the config param to `Core` and forward it:
 ```go
 func Core(scope *model.Scope, query, key, value *Node, scale float64, attentionMask *Node, dropoutRate *Node,
 	layout AxesLayout, useCausalMask, wantCoefficients bool, scoreSoftCap float64, useFusion bool,
 	fusedConfig *compute.ScaledDotProductAttentionConfig) (output, coefficients *Node) {
 ```
-(Add `"github.com/gomlx/compute"` to attention.go imports if not present — it already imports it via the `AxesLayout` alias, confirm.) In the fused closure (~270-272), pass `fusedConfig` instead of `nil`:
+(Add `"github.com/gomlx/compute"` to attention.go imports if not present — confirm; the package already imports `compute/dtypes` and `compute/shapes`.) In the fused closure (~270-272), pass `fusedConfig` instead of `nil`:
 ```go
 				return BackendFusedScaledDotProductAttention(
 					query, key, value, attentionMask,
@@ -478,7 +522,7 @@ In `ml/layers/attention/multiheadattention.go`, add fields (after `useFusion boo
 	querySeqLen    *Node
 	keyValueSeqLen *Node
 ```
-Add the method near `UseFusion`:
+Add the method near `WithFusion`:
 ```go
 // WithSeqLens supplies per-batch actual sequence lengths (int32 [B] nodes) for padding masking
 // via the fused SDPA path. Mutually exclusive with an explicit query/key matrix mask; setting
@@ -511,13 +555,13 @@ In `doneInternal`, build the config and pass it to `Core`:
 
 - [ ] **Step 4: Update the remaining Core call sites for the new trailing param**
 
-The production caller in `doneInternal` is done above. Update `attention_test.go`'s 12 calls to append `, nil` (no fused config), and the `TestCoreUseFusionFalseMatchesDecomposed` / any `fusion_test.go` Core calls to append `, nil`.
+The production caller in `doneInternal` is done above. Update `attention_test.go`'s 15 calls to append `, nil` (no fused config), and the `TestCoreUseFusionFalseMatchesDecomposed` / any `fusion_test.go` Core calls to append `, nil`.
 
 Run: `grep -rn 'Core(scope' ml/layers/attention/*_test.go` and append `, nil` to each call that does not already pass a config.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `go test ./ml/layers/attention/ -run 'TestWithSeqLensRejectsExplicitMask|TestCoreUseFusionFalseMatchesDecomposed|TestBuilderUseFusionDefaultsTrue'`
+Run: `go test ./ml/layers/attention/ -run 'TestWithSeqLensRejectsExplicitMask|TestCoreUseFusionFalseMatchesDecomposed|TestBuilderWithFusionDefaultsTrue'`
 Expected: PASS.
 
 - [ ] **Step 6: Run the package to confirm no call site missed**
@@ -540,48 +584,61 @@ KeyValueSeqLen and is mutually exclusive with an explicit query/key matrix mask
 
 ---
 
-## Task 5: `SimpleAttention` helper + `GetOfficialBackend`
+## Task 5: `SimpleAttention` package func (scope-free, returns *Node) + `GetOfficialBackend` [S1]
 
-Add the thin `SimpleAttention` package function (pre-projected + explicit scale) and the `testutil.GetOfficialBackend` skip-or-return helper.
+Add the scope-free `SimpleAttention` package function (Contract D, decided 2026-06-29 option A) and the `testutil.GetOfficialBackend` skip-or-return helper. lmkit-go's migrated `FlashAttention` call site (Contract F) is `SimpleAttention`'s first and motivating caller.
+
+**DECIDED CHANGE (option A) — DIVERGES from Jan's inline sketch; flag in the PR.** Contract D's revised entry makes `SimpleAttention` **scope-free** and **returns a `*Node`**, NOT a `*MultiHeadAttentionBuilder`:
+```go
+func SimpleAttention(query, key, value *Node, scale float64) *Node
+```
+It is the direct, backend-generic drop-in for the deleted `FlashAttention`: pre-projected, causal, equal q/kv heads (the caller has already repeated KV to nH), implemented **directly over `InternalFusedOpCaller(fused, decomposed)`** — fuse when the backend supports it, decompose otherwise — **NOT** via the `MultiHeadAttention` builder. Jan's sketch took a `*model.Scope` and returned a builder; this does neither. Rationale per Contract D: pre-projected inputs carry no projection variables, so a scope is pure ceremony, and the only real caller (lmkit-go) is scope-free by design. State the divergence in the PR description.
+
+This is essentially the body of the deleted `FlashAttention`, minus its CUDA-flavored name and its inline GQA repeat (callers pass equal heads): the fused closure calls `BackendFusedScaledDotProductAttention(query,key,value,nil,numHeads,numHeads,AxesLayoutBSHD,scale,true,nil)`, the decomposed closure calls the retained `naiveCausalAttention(query,key,value,scale)`. `InternalFusedOpCaller` performs the `ErrNotImplemented → decomposed` fallback and wires the decomposed VJP, so no hand-written fallback/VJP is needed (unlike the old `FlashAttention`, which open-coded the `TryCatch` + `IsNotImplemented` branch).
 
 **Files:**
-- Modify: `ml/layers/attention/multiheadattention.go` (new package function)
+- Modify: `ml/layers/attention/fusion.go` (new package function — the same non-test file that retains `naiveCausalAttention` per Task 1)
 - Modify: `support/testutil/testutil.go` (new `GetOfficialBackend`)
 - Test: `ml/layers/attention/fusion_test.go`
 
 **Interfaces:**
 - Produces (Contract D):
   ```go
-  func SimpleAttention(scope *model.Scope, query, key, value *Node, scale float64) *MultiHeadAttentionBuilder
+  func SimpleAttention(query, key, value *Node, scale float64) *Node
   func (testutil) GetOfficialBackend(name string) compute.Backend
   ```
-- Consumes: `WithPreProjected(true)`, `WithQueryKeyScale(scale)` (existing).
+- Consumes: `InternalFusedOpCaller`, `BackendFusedScaledDotProductAttention` (from `core/graph`, dot-imported), `naiveCausalAttention` (retained in-package per Task 1).
 
 - [ ] **Step 1: Write the failing tests (CPU)**
 
 Add to `ml/layers/attention/fusion_test.go`:
 ```go
-// TestSimpleAttentionWiring pins that SimpleAttention preconfigures pre-projected + explicit scale:
-// its causal output matches a manual MultiHeadAttention(...).WithPreProjected(true).WithQueryKeyScale(scale)
-// build on CPU. Q/K/V are already projected [B,S,H,D] reshaped to [B,S,H*D] inputs.
+// TestSimpleAttentionWiring pins that SimpleAttention (scope-free, returns *Node) produces a finite,
+// correctly-shaped [B,S,H,D] output on the CPU backend, and that with fusion off (GOMLX_FUSION=0 path)
+// it equals the decomposed naiveCausalAttention reference exactly. On CPU the fused causal kernel is
+// ErrNotImplemented, so InternalFusedOpCaller takes the decomposed path either way; this guards the
+// wiring (no builder, no scope) and the fused/decomposed equivalence. Q/K/V are already projected
+// [B,S,H,D] with equal heads.
 func TestSimpleAttentionWiring(t *testing.T) {
 	backend := testutil.BuildTestBackend()
 	const B, S, H, D = 1, 16, 2, 8
 	scale := 0.3
-	q := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 1), B, S, H*D)
-	k := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 2), B, S, H*D)
-	v := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 3), B, S, H*D)
+	q := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 1), B, S, H, D)
+	k := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 2), B, S, H, D)
+	v := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 3), B, S, H, D)
 
-	store := model.NewStore()
-	exec := model.MustNewExec(backend, store, func(scope *model.Scope, qn, kn, vn *Node) []*Node {
-		simple := SimpleAttention(scope.In("s"), qn, kn, vn, scale).UseCausalMask().Done()
-		manual := MultiHeadAttention(scope.In("m"), qn, kn, vn, H, D).
-			WithPreProjected(true).WithQueryKeyScale(scale).UseCausalMask().Done()
-		require.Equal(t, manual.Shape().Dimensions, simple.Shape().Dimensions)
-		return []*Node{simple, manual}
+	exec := MustNewExec(backend, func(qn, kn, vn *Node) []*Node {
+		out := ConvertDType(SimpleAttention(qn, kn, vn, scale), dtypes.Float32)
+		ref := naiveCausalAttention(qn, kn, vn, scale)
+		// rel error vs the decomposed reference; on CPU both ARE the decomposed path, so ~0.
+		rel := Div(ReduceAllMax(Abs(Sub(out, ref))), AddScalar(ReduceAllMax(Abs(ref)), 1e-6))
+		return []*Node{out, rel}
 	})
-	out := exec.MustCall(q, k, v)
-	require.Equal(t, []int{B, S, H * D}, out[0].Shape().Dimensions)
+	res := exec.MustCall(q, k, v)
+	require.Equal(t, []int{B, S, H, D}, res[0].Shape().Dimensions)
+	rel := float64(tensors.ToScalar[float32](res[1]))
+	require.False(t, math.IsNaN(rel), "SimpleAttention output is NaN")
+	require.LessOrEqual(t, rel, 1e-6, "SimpleAttention off-fusion must equal the decomposed reference on CPU")
 }
 
 // TestGetOfficialBackendSkipsWhenAbsent pins that GetOfficialBackend returns the named backend when
@@ -592,7 +649,7 @@ func TestGetOfficialBackendSkipsWhenAbsent(t *testing.T) {
 	require.Nil(t, testutil.GetOfficialBackend("definitely-not-a-backend"))
 }
 ```
-(`SimpleAttention` infers `numHeads`/`headDim` from the pre-projected shape. With pre-projected inputs `[B,S,H*D]`, the builder needs `numHeads` and `headDim`; derive them is impossible from a flat last dim alone. So `SimpleAttention` takes the already-head-split inputs `[B,S,H,D]` — see the signature note in Step 3 and adjust the test input shapes to `[B,S,H,D]` accordingly.)
+(`math` is imported by Task 6; if Task 5 lands first, add `"math"` to the `fusion_test.go` import block here.)
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -601,31 +658,41 @@ Expected: FAIL — `SimpleAttention undefined` / `testutil.GetOfficialBackend un
 
 - [ ] **Step 3: Implement SimpleAttention and GetOfficialBackend**
 
-`SimpleAttention` consumes inputs already projected to `[B, S, numHeads, headDim]` (so it can read `numHeads`/`headDim` off the shape) and reshapes them to the `[B,S,H*D]` the builder's pre-projected path expects. Add to `multiheadattention.go`:
+`SimpleAttention` takes inputs already projected to `[B, S, numHeads, headDim]` with KV heads already repeated to nH (equal heads, the caller's job). It reads `numHeads` off the query shape and routes through `InternalFusedOpCaller`: the fused closure calls the backend op, the decomposed closure calls `naiveCausalAttention` (retained in-package — see Task 1). Add to `ml/layers/attention/fusion.go`:
 ```go
-// SimpleAttention is a thin helper for the common pre-projected case: query/key/value are already
-// projected to [batch, seq, numHeads, headDim]. It preconfigures the builder with WithPreProjected
-// and an explicit scale, so existing pre-projected callers get fusion transparently via Done().
-// Pass UseCausalMask()/WithSeqLens()/UseFusion() as needed before Done().
-func SimpleAttention(scope *model.Scope, query, key, value *Node, scale float64) *MultiHeadAttentionBuilder {
-	qDims := query.Shape().Dimensions
-	if len(qDims) != 4 {
-		Panicf("SimpleAttention requires query shaped [batch, seq, numHeads, headDim]; got %s", query.Shape())
+// SimpleAttention computes causal multi-head attention over pre-projected, equal-head inputs:
+// query, key, value are [batch, seq, numHeads, headDim] (the caller has already repeated any KV
+// heads up to numHeads). It is the scope-free, backend-generic drop-in for the removed
+// FlashAttention: it fuses via the backend's scaled-dot-product-attention op when supported and
+// falls back to a decomposed causal attention otherwise, with InternalFusedOpCaller wiring the
+// decomposed VJP. Output is [batch, seq, numHeads, headDim] in query's dtype.
+//
+// Returns a *Node, not a builder, and takes no model.Scope, because pre-projected inputs carry no
+// projection variables. Use the MultiHeadAttention builder for the projected / GQA / masked cases.
+func SimpleAttention(query, key, value *Node, scale float64) *Node {
+	for _, n := range []*Node{query, key, value} {
+		n.AssertRank(4)
 	}
-	numHeads, headDim := qDims[2], qDims[3]
-	flat := func(n *Node) *Node {
-		d := n.Shape().Dimensions
-		return Reshape(n, d[0], d[1], d[2]*d[3])
+	if !query.Shape().Equal(key.Shape()) || !key.Shape().Equal(value.Shape()) {
+		Panicf("SimpleAttention requires query/key/value to share shape [B,S,nH,D] (equal heads); got query=%s key=%s value=%s", query.Shape(), key.Shape(), value.Shape())
 	}
-	return MultiHeadAttention(scope, flat(query), flat(key), flat(value), numHeads, headDim).
-		WithPreProjected(true).
-		WithQueryKeyScale(scale)
+	numHeads := query.Shape().Dimensions[2]
+	output := InternalFusedOpCaller(
+		func() *Node {
+			// BSHD, causal, equal heads. The backend casts to bf16 and runs the fused (cuDNN flash)
+			// kernel, attaching the flash backward as the node's custom gradient.
+			return BackendFusedScaledDotProductAttention(
+				query, key, value, nil, numHeads, numHeads,
+				compute.AxesLayoutBSHD, scale, true /* causal */, nil)
+		},
+		func() *Node {
+			return naiveCausalAttention(query, key, value, scale)
+		},
+	)
+	return ConvertDType(output, query.DType())
 }
 ```
-Update the test inputs in Step 1 to `[B,S,H,D]` (4-D) rather than `[B,S,H*D]`, e.g.:
-```go
-	q := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 1), B, S, H, D)
-```
+(`fusion.go` already imports `github.com/gomlx/compute` and dot-imports `core/graph` and `support/exceptions` — see Task 1; no new imports.)
 Add to `support/testutil/testutil.go`:
 ```go
 // GetOfficialBackend returns the named official backend if it was successfully initialized,
@@ -648,17 +715,21 @@ Expected: PASS.
 
 ```bash
 cd /Users/guygrigsby/projects/forks/gomlx
-git add ml/layers/attention/multiheadattention.go support/testutil/testutil.go ml/layers/attention/fusion_test.go
-git commit -m "attention: add SimpleAttention helper and testutil.GetOfficialBackend
+git add ml/layers/attention/fusion.go support/testutil/testutil.go ml/layers/attention/fusion_test.go
+git commit -m "attention: add scope-free SimpleAttention(*Node) and testutil.GetOfficialBackend
 
-SimpleAttention preconfigures the pre-projected builder with an explicit scale.
-GetOfficialBackend returns a named official backend or nil (caller skips), used
-by the xla:cuda fusion-parity test."
+SimpleAttention is the pre-projected, equal-head, causal drop-in for the deleted
+FlashAttention: scope-free, returns a *Node, implemented directly over
+InternalFusedOpCaller (fused when supported, naiveCausalAttention otherwise) rather
+than the MultiHeadAttention builder. lmkit-go (scope-free) is its first caller.
+Diverges from Jan's builder-returning sketch per Contract D; flagged in the PR.
+GetOfficialBackend returns a named official backend or nil (caller skips), used by
+the xla:cuda fusion-parity test."
 ```
 
 ---
 
-## Task 6: Generalize parity tests — `backendSupportsFusion`, loop official backends
+## Task 6: Generalize parity tests — `backendSupportsFusion`, loop official backends [S1]
 
 Replace `isCUDABackend` with a capability probe `backendSupportsFusion`, rewrite the parity/fallback tests to loop `testutil.TestOfficialBackends` and skip when fusion is unsupported, and add one `xla:cuda`-specific fusion-parity test via `GetOfficialBackend`.
 
@@ -705,10 +776,10 @@ func backendSupportsFusion(backend compute.Backend) bool {
 (If building a graph that calls the backend op directly is awkward through `MustNewExec`, the simpler form is to call `BackendFusedScaledDotProductAttention` inside the exec function and catch with `TryCatch`; the key is: returns true unless the error `compute.IsNotImplemented`. Keep the probe shape tiny and causal bf16 per Contract D.)
 
 ```go
-// TestFusionFallbackParity checks that on every official backend, attention through the builder
-// (fused path attempted) matches the decomposed reference, forward and gradients. On a backend
-// without the fused kernel this exercises the ErrNotImplemented fallback; on one with it, it is a
-// parity check. Loops all official backends.
+// TestFusionFallbackParity checks that on every official backend, attention through Core (fused path
+// attempted) matches the decomposed reference, forward and gradients. On a backend without the fused
+// kernel this exercises the ErrNotImplemented fallback; on one with it, it is a parity check. Loops
+// all official backends.
 func TestFusionFallbackParity(t *testing.T) {
 	testutil.TestOfficialBackends(t, func(t *testing.T, backend compute.Backend) {
 		const B, S, H, D = 1, 64, 2, 64
@@ -800,7 +871,7 @@ func TestRepeatKVHeads(t *testing.T) {
 	require.Equal(t, []float32{10, 10, 20, 20}, out[0].Value().([]float32))
 }
 
-// TestCUDAFusionParity [trig] cross-checks the cuDNN fused kernel against the float32 reference at
+// TestCUDAFusionParity [cuda] cross-checks the cuDNN fused kernel against the float32 reference at
 // the head dims cuDNN flash supports (64, 128). Skipped unless the xla:cuda backend is present.
 func TestCUDAFusionParity(t *testing.T) {
 	backend := testutil.GetOfficialBackend("xla:cuda")
@@ -846,11 +917,11 @@ Add `"fmt"` and `"math"` to the `fusion_test.go` import block.
 Run: `go test ./ml/layers/attention/`
 Expected: PASS. `TestCUDAFusionParity` skips (no `xla:cuda`); all generalized/parity/builder tests pass via the CPU fallback path.
 
-- [ ] **Step 6: [trig] Run the CUDA parity test on trig**
+- [ ] **Step 6: [cuda] Run the CUDA parity test on the CUDA host**
 
-Run (on trig, after `git pull` in the fork checkout):
+Run (on the CUDA host, after `git pull` in the fork checkout):
 ```bash
-GOMLX_BACKEND=xla:cuda gputex run "gomlx fusion parity" -- \
+GOMLX_BACKEND=xla:cuda \
   go test ./ml/layers/attention/ -run 'TestCUDAFusionParity|TestFusionFallbackParity|TestFusionGQAParity' -v
 ```
 Expected: PASS — `TestCUDAFusionParity/D=64` and `/D=128` run the cuDNN kernel and stay within tolerance; the looped parity tests run with `tol=0.06` (fusion supported) and pass.
@@ -870,16 +941,16 @@ GetOfficialBackend. Pin repeatKVHeads grouping."
 
 ---
 
-## Task 7: Rename and rework the throughput/memory bench
+## Task 7: Rename and rework the throughput/memory bench [S1]
 
-Rename `flash_bench_test.go` → `fusion_bench_test.go`. `attentionStep` uses the **same** code path for fused and non-fused (toggling via `UseFusion`, not a separate `naiveCausalAttention` branch). Rename `TestFlashThroughput` → `TestFusionThroughput`. Add `out[0].FinalizeAll()` after the sync. Use `for range iters`. Replace `GOMLX_MEM_PROBE`/`GOMLX_PROBE_S` env gating with Go test flags.
+Rename `flash_bench_test.go` → `fusion_bench_test.go`. `attentionStep` uses the **same** code path for fused and non-fused (toggling via `WithFusion`, not a separate `naiveCausalAttention` branch). Rename `TestFlashThroughput` → `TestFusionThroughput`. Add `out[0].FinalizeAll()` after the sync. Use `for range iters`. Replace `GOMLX_MEM_PROBE`/`GOMLX_PROBE_S` env gating with Go test flags.
 
 **Files:**
 - Rename: `ml/layers/attention/flash_bench_test.go` → `ml/layers/attention/fusion_bench_test.go`
 - Modify: the renamed file (rewrite `attentionStep`, `TestFusionThroughput`, memory probe).
 
 **Interfaces:**
-- Consumes: `SimpleAttention`, `UseFusion`, `backendSupportsFusion`, `testutil.BuildTestBackend`.
+- Consumes: `MultiHeadAttention` builder (`WithPreProjected`/`WithQueryKeyScale`/`WithFusion`/`WithNumKVHeads`/`UseCausalMask`), `backendSupportsFusion`, `testutil.BuildTestBackend`. (NOT `SimpleAttention` — the bench needs the WithFusion toggle and GQA, which the scope-free helper does not expose.)
 
 - [ ] **Step 1: Rename the file**
 
@@ -916,12 +987,20 @@ var (
 )
 
 // attentionStep builds one forward+backward attention step through the SAME builder path for both
-// fused and non-fused — fusion toggles via UseFusion, not a separate decomposed code path — so the
+// fused and non-fused — fusion toggles via WithFusion, not a separate decomposed code path — so the
 // benchmark compares the two routes of one implementation. Returns a scalar so reading it forces a
 // device sync. query/key/value are pre-projected [B,S,H,D].
+//
+// The bench uses the MultiHeadAttention builder directly (NOT the scope-free SimpleAttention helper),
+// because it needs the WithFusion toggle and GQA (WithNumKVHeads) — neither of which SimpleAttention
+// exposes (it is scope-free, returns a *Node, equal-head, fusion-automatic). SimpleAttention is the
+// lmkit-go drop-in; the builder is the right surface for a fused-vs-decomposed micro-benchmark.
 func attentionStep(useFusion bool, qHeads, kvHeads int, scale float64) func(scope *model.Scope, q, k, v *Node) []*Node {
 	return func(scope *model.Scope, q, k, v *Node) []*Node {
-		b := SimpleAttention(scope, q, k, v, scale).UseCausalMask().UseFusion(useFusion)
+		// Pre-projected [B,S,H,D] in, flatten the head dims for the builder's pre-projected path.
+		flat := func(n *Node) *Node { d := n.Shape().Dimensions; return Reshape(n, d[0], d[1], d[2]*d[3]) }
+		b := MultiHeadAttention(scope, flat(q), flat(k), flat(v), qHeads, q.Shape().Dimensions[3]).
+			WithPreProjected(true).WithQueryKeyScale(scale).UseCausalMask().WithFusion(useFusion)
 		if kvHeads != qHeads {
 			b = b.WithNumKVHeads(kvHeads)
 		}
@@ -932,7 +1011,7 @@ func attentionStep(useFusion bool, qHeads, kvHeads int, scale float64) func(scop
 }
 
 // TestFusionThroughput reports per-step (forward+backward) wall time for the fused vs decomposed
-// route at the lm-100m attention shape. Requires a backend that supports fusion (cuDNN). [trig]
+// route at the lm-100m attention shape. Requires a backend that supports fusion (cuDNN). [cuda]
 func TestFusionThroughput(t *testing.T) {
 	backend := testutil.BuildTestBackend()
 	if !backendSupportsFusion(backend) {
@@ -981,7 +1060,7 @@ func TestFusionThroughput(t *testing.T) {
 
 // TestFusionMemoryProbe runs one attention variant repeatedly so an external sampler (nvidia-smi,
 // XLA preallocation disabled) can read the working-set peak. Enable with
-// -mem_probe=fused|decomposed; skipped otherwise. [trig]
+// -mem_probe=fused|decomposed; skipped otherwise. [cuda]
 func TestFusionMemoryProbe(t *testing.T) {
 	if *memProbeVariant == "" {
 		t.Skip("pass -mem_probe=fused|decomposed to run the memory probe")
@@ -1019,11 +1098,11 @@ grep -rn 'FlashAttention\|isCUDABackend\|GOMLX_MEM_PROBE\|GOMLX_PROBE_S\|TestFla
 ```
 Expected: no output.
 
-- [ ] **Step 4: [trig] Run the throughput bench on trig**
+- [ ] **Step 4: [cuda] Run the throughput bench on the CUDA host**
 
-Run (on trig):
+Run (on the CUDA host):
 ```bash
-GOMLX_BACKEND=xla:cuda gputex run "gomlx fusion throughput" -- \
+GOMLX_BACKEND=xla:cuda \
   go test ./ml/layers/attention/ -run TestFusionThroughput -v
 ```
 Expected: logs fused and decomposed per-step times and a speedup ratio; PASS.
@@ -1036,17 +1115,17 @@ git add ml/layers/attention/fusion_bench_test.go
 git commit -m "attention: rework throughput/memory bench through one fusion-toggled path
 
 Rename flash_bench_test.go -> fusion_bench_test.go and TestFlashThroughput ->
-TestFusionThroughput. attentionStep now runs the SAME SimpleAttention builder for
-both routes, toggling UseFusion, so the bench compares one implementation's two
-paths. FinalizeAll after each sync; for range iters; replace GOMLX_MEM_PROBE/
+TestFusionThroughput. attentionStep now runs the SAME MultiHeadAttention builder
+for both routes, toggling WithFusion, so the bench compares one implementation's
+two paths. FinalizeAll after each sync; for range iters; replace GOMLX_MEM_PROBE/
 GOMLX_PROBE_S env gating with -mem_probe/-mem_probe_seqlen test flags."
 ```
 
 ---
 
-## Verification Gate (Plan 03)
+## Stage 1 Verification Gate (Plan 03)
 
-Per Contract section "Verification gates / 03 gomlx". Run all on the Mac first; the `[trig]` line on trig.
+Per Contract section "Verification gates / 03 gomlx". Run all on the Mac first; the `[cuda]` line on the CUDA host. **This gate closes Stage 1. Stop here for Guy's review before starting Stage 2.**
 
 - [ ] **Gate 1 — Mac (CPU) full package green**
 
@@ -1056,7 +1135,7 @@ cd /Users/guygrigsby/projects/forks/gomlx
 go build ./...
 go test ./ml/layers/attention/...
 ```
-Expected: PASS. Covers decomposed path, `ErrNotImplemented` fallback, `UseFusion(false)`, `WithSeqLens` validation, `SimpleAttention` wiring, `GetOfficialBackend` skip behavior. `TestCUDAFusionParity`, `TestFusionThroughput`, `TestFusionMemoryProbe` SKIP (no `xla:cuda`).
+Expected: PASS. Covers decomposed path, `ErrNotImplemented` fallback, `WithFusion(false)`, `WithSeqLens` validation, `SimpleAttention` wiring, `GetOfficialBackend` skip behavior. `TestCUDAFusionParity`, `TestFusionThroughput`, `TestFusionMemoryProbe` SKIP (no `xla:cuda`).
 
 - [ ] **Gate 2 — No leftover CUDA-shaped surface**
 
@@ -1068,34 +1147,357 @@ test ! -e ml/layers/attention/flash.go && test ! -e ml/layers/attention/flash_te
 ```
 Expected: no grep output; prints `OK: flash files removed`.
 
-- [ ] **Gate 3 — [trig] cuDNN fusion-parity green**
+- [ ] **Gate 3 — [cuda] cuDNN fusion-parity green**
 
-Run (on trig, fork checkout pulled to the latest `flash-attention` commit):
+Run (on the CUDA host, fork checkout pulled to the latest `flash-attention` commit):
 ```bash
-GOMLX_BACKEND=xla:cuda gputex run "gomlx plan03 gate" -- \
+GOMLX_BACKEND=xla:cuda \
   go test ./ml/layers/attention/... -run 'TestCUDAFusionParity|TestFusionFallbackParity|TestFusionGQAParity|TestFusionThroughput' -v
 ```
 Expected: PASS — the cuDNN fused kernel runs (parity within tolerance for D=64 and D=128), the looped parity tests pass at `tol=0.06`, and throughput reports a speedup.
 
 - [ ] **Gate 4 — Stop and report**
 
-All gates green → plan 03 (Contract D) is satisfied; downstream plan 04 (go-huggingface) may consume `UseFusion`/`WithSeqLens`/`SimpleAttention` via the local `replace` on this gomlx fork. Report the gate output to Guy for manual diff review before any push.
+All gates green → plan 03 Stage 1 (Contract D, S1 surface) is satisfied; downstream plan 04 (go-huggingface) and Contract F (lmkit-go) may consume `WithFusion`/`WithSeqLens`/`SimpleAttention` via the local `replace` on this gomlx fork. Report the gate output to Guy for manual diff review before any push, and before starting Stage 2.
+
+---
+
+## Task 8: Builder `WithAttentionBias` → config Bias [S2]
+
+**Depends on compute Stage 2:** `compute.ScaledDotProductAttentionConfig` must carry the `Bias Value` field (plan 01 Stage 2). Do not start until it does.
+
+Add an `attentionBias *Node` field and a `WithAttentionBias(bias *Node)` builder method that populates `config.Bias`. This is the additive attention-score bias broadcast to `[B,H,S,Skv]` (ALiBi / relative-position). **It is DISTINCT from the existing `UseProjectionBias`** (the Q/K/V / output dense bias) and MUST NOT be conflated: `UseProjectionBias` toggles a learned bias term inside the linear projections; `WithAttentionBias` adds a caller-supplied tensor to the attention scores before softmax. They are independent and may both be set. The method threads the bias node into the fused config (the score bias rides in `ScaledDotProductAttentionConfig.Bias`, which only exists after compute Stage 2).
+
+**Files:**
+- Inspect: the compute fork `fused_ops.go` (verify `Bias Value` field exists)
+- Modify: `core/graph/fused_ops.go` (extend `NewSeqLenAttentionConfig` or add a sibling helper that also sets `Bias`)
+- Modify: `ml/layers/attention/multiheadattention.go` (field, method, config construction in `doneInternal`)
+- Test: `ml/layers/attention/fusion_test.go`
+
+**Interfaces:**
+- Produces (Contract D):
+  ```go
+  func (b *MultiHeadAttentionBuilder) WithAttentionBias(bias *Node) *MultiHeadAttentionBuilder
+  ```
+- Consumes (Contract A, Stage 2): `compute.ScaledDotProductAttentionConfig{ Bias Value }`.
+
+- [ ] **Step 0: Verify compute Stage 2 `Bias` field exists**
+
+Run:
+```bash
+cd /Users/guygrigsby/projects/forks/gomlx
+go doc github.com/gomlx/compute.ScaledDotProductAttentionConfig
+```
+Expected: lists `Bias Value` (plus `DropoutRate`, `DropoutSeed`, `DropoutOffset` for Task 9). If absent, STOP and report: "plan 01 Stage 2 (compute) is not integrated; cannot proceed with plan 03 Stage 2."
+
+- [ ] **Step 1: Write the failing test (CPU)**
+
+The fused bias path is `ErrNotImplemented` on CPU (capability stays off), so the CPU test pins that bias flows through the decomposed path and is NOT conflated with the projection bias. Add to `ml/layers/attention/fusion_test.go`:
+```go
+// TestWithAttentionBiasIsDistinctFromProjectionBias pins that WithAttentionBias adds a score bias
+// (changing the output) and is independent of UseProjectionBias. On CPU the fused path falls back to
+// decomposed; the decomposed path must honor the additive score bias. A zero bias is a no-op; a
+// nonzero bias shifts the output.
+func TestWithAttentionBiasIsDistinctFromProjectionBias(t *testing.T) {
+	backend := testutil.BuildTestBackend()
+	const B, S, H, D = 1, 16, 2, 8
+	scale := 0.125
+	q := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 1), B, S, H, D)
+	k := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 2), B, S, H, D)
+	v := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 3), B, S, H, D)
+	// Nonzero bias [B,H,S,S].
+	biasData := randFlat(B*H*S*S, 9)
+	bias := tensors.FromFlatDataAndDimensions(biasData, B, H, S, S)
+
+	// preProj builds the pre-projected builder from [B,S,H,D] inputs. WithAttentionBias is a builder
+	// method, so these S2 tests use the MultiHeadAttention builder, NOT the scope-free SimpleAttention
+	// helper (which takes no scope and exposes no With* methods).
+	flat := func(n *Node) *Node { d := n.Shape().Dimensions; return Reshape(n, d[0], d[1], d[2]*d[3]) }
+	preProj := func(scope *model.Scope, qn, kn, vn *Node) *MultiHeadAttentionBuilder {
+		return MultiHeadAttention(scope, flat(qn), flat(kn), flat(vn), H, D).
+			WithPreProjected(true).WithQueryKeyScale(scale)
+	}
+
+	store := model.NewStore()
+	exec := model.MustNewExec(backend, store, func(scope *model.Scope, qn, kn, vn, bn *Node) []*Node {
+		base := preProj(scope.In("base"), qn, kn, vn).Done()
+		biased := preProj(scope.In("biased"), qn, kn, vn).WithAttentionBias(bn).Done()
+		// A nonzero score bias must change the output.
+		return []*Node{ReduceAllMax(Abs(Sub(base, biased)))}
+	})
+	out := exec.MustCall(q, k, v, bias)
+	delta := float64(tensors.ToScalar[float32](out[0]))
+	require.Greater(t, delta, 1e-4, "nonzero attention bias must change the output (decomposed path)")
+}
+```
+(This requires the decomposed path to honor `fusedConfig.Bias`. If the decomposed path does not yet read a bias from the config, add it: in `Core`'s `decomposedFn`, after `scores = MulScalar(...)` and before the mask, `if fusedConfig != nil && fusedConfig.Bias is set { scores = Add(scores, biasNode) }`. The bias arrives as a `compute.Value` in the config; thread the original `*Node` into `Core` alongside the config — simplest is to pass the bias as the existing `attentionMask` additive-float operand when no explicit mask is set, OR add a dedicated `biasNode *Node` param to `Core`. Pick the dedicated param to keep mask semantics clean; grep how `attentionMask` additive-float is applied at `attention.go:237-240` and mirror it. State the chosen wiring in the commit.)
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `go test ./ml/layers/attention/ -run TestWithAttentionBiasIsDistinctFromProjectionBias`
+Expected: FAIL — compile error `b.WithAttentionBias undefined`.
+
+- [ ] **Step 3: Add the field, method, config plumbing, and decomposed-path bias**
+
+In `ml/layers/attention/multiheadattention.go`, add the field (after `keyValueSeqLen *Node`):
+```go
+	attentionBias *Node // additive attention-score bias [B,H,S,Skv]; distinct from useProjectionBias.
+```
+Add the method near `WithSeqLens`:
+```go
+// WithAttentionBias supplies an additive attention-score bias broadcast to [B,H,S,Skv]
+// (ALiBi / relative-position), added to the scores before softmax. This is DISTINCT from
+// UseProjectionBias, which toggles the learned bias term inside the Q/K/V and output dense
+// projections. The two are independent and may both be set. Populates
+// ScaledDotProductAttentionConfig.Bias for the fused path; the decomposed fallback adds it
+// directly to the scores. nil = unused.
+func (b *MultiHeadAttentionBuilder) WithAttentionBias(bias *Node) *MultiHeadAttentionBuilder {
+	b.attentionBias = bias
+	return b
+}
+```
+Extend `core/graph/fused_ops.go`'s config helper (or add a sibling) so it also sets `Bias` when a bias node is present:
+```go
+// NewFusedAttentionConfig builds a ScaledDotProductAttentionConfig from optional seqlen and bias
+// nodes (all may be nil). Supersedes NewSeqLenAttentionConfig once bias is in play.
+func NewFusedAttentionConfig(querySeqLen, keyValueSeqLen, bias *Node) *compute.ScaledDotProductAttentionConfig {
+	cfg := &compute.ScaledDotProductAttentionConfig{}
+	if querySeqLen != nil {
+		cfg.QuerySeqLen = querySeqLen.outputOps[0]
+	}
+	if keyValueSeqLen != nil {
+		cfg.KeyValueSeqLen = keyValueSeqLen.outputOps[0]
+	}
+	if bias != nil {
+		cfg.Bias = bias.outputOps[0]
+	}
+	return cfg
+}
+```
+In `doneInternal`, build the config with the bias and thread the bias `*Node` into `Core` (see Step 1's wiring note — pass a dedicated `biasNode *Node` param to `Core` so the decomposed fallback can add it to the scores):
+```go
+	var fusedConfig *compute.ScaledDotProductAttentionConfig
+	if b.querySeqLen != nil || b.keyValueSeqLen != nil || b.attentionBias != nil {
+		fusedConfig = NewFusedAttentionConfig(b.querySeqLen, b.keyValueSeqLen, b.attentionBias)
+	}
+	attentionOutput, attentionCoefficients = Core(b.scope, projectedQuery, projectedKey, projectedValue,
+		scale, mask, b.dropoutRate, b.layout, useCausalMask, wantCoefficients, b.scoreSoftCap, b.useFusion,
+		fusedConfig, b.attentionBias)
+```
+In `Core` (`attention.go`), add the trailing `biasNode *Node` param and, in `decomposedFn`, add the bias to the scores (mirror the additive-float-mask handling at lines 237-240):
+```go
+	scores = MulScalar(scores, scale)
+	if biasNode != nil {
+		scores = Add(scores, biasNode) // additive score bias; broadcasts [B,H,S,Skv] / [B,S,H,Skv] per layout.
+	}
+```
+Update all `Core(...)` call sites (1 production + 15 in `attention_test.go` + the `fusion_test.go` calls) to append `, nil` for the new `biasNode` param.
+
+Run after editing: `grep -rn 'Core(scope' ml/layers/attention/*_test.go` and confirm each non-bias call appends the trailing `nil`.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `go test ./ml/layers/attention/ -run TestWithAttentionBiasIsDistinctFromProjectionBias`
+Expected: PASS (decomposed path applies the bias on CPU).
+
+- [ ] **Step 5: Run the package**
+
+Run: `go build ./... && go test ./ml/layers/attention/`
+Expected: PASS.
+
+- [ ] **Step 6: [cuda] Bias fused-parity on the CUDA host**
+
+Add an `xla:cuda` bias-parity case (mirror `TestCUDAFusionParity`, but build `Core` with a nonzero bias and compare against `naiveCausalAttention` with the same bias added to its scores). Run on the CUDA host:
+```bash
+GOMLX_BACKEND=xla:cuda \
+  go test ./ml/layers/attention/ -run 'TestCUDAFusionParity|TestWithAttentionBias' -v
+```
+Expected: PASS — the `fmhaScaleBiasSoftmax` variant runs and stays within tolerance.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /Users/guygrigsby/projects/forks/gomlx
+git add core/graph/fused_ops.go ml/layers/attention/attention.go ml/layers/attention/multiheadattention.go ml/layers/attention/attention_test.go ml/layers/attention/fusion_test.go
+git commit -m "attention: add WithAttentionBias (score bias, distinct from UseProjectionBias)
+
+WithAttentionBias adds a caller-supplied additive score bias [B,H,S,Skv] before
+softmax, populating ScaledDotProductAttentionConfig.Bias for the fused path and
+added directly to scores in the decomposed fallback. Independent of the projection
+bias (UseProjectionBias); both may be set. Core gains a trailing biasNode param."
+```
+
+---
+
+## Task 9: Relax Core's `!dropoutActive` fused-branch gate [S2]
+
+**Depends on compute Stage 2:** `compute.ScaledDotProductAttentionConfig` must carry `DropoutRate float64`, `DropoutSeed Value`, `DropoutOffset Value` (plan 01 Stage 2). Verified by Task 8 Step 0.
+
+Today `Core`'s fused branch is gated so that active dropout forces the decomposed path. The current condition (`attention.go:265`) is:
+```go
+	if wantCoefficients || dropoutActive || scoreSoftCap > 0 || !useFusion {
+		output, coefficients = decomposedFn()
+	} else { /* fused */ }
+```
+where `dropoutActive := layers.IsDropoutActive(scope, g) && dropoutRate != nil` (line 195). Stage 2 relaxes this so `Core` may fuse **with** dropout when the backend supports fused dropout, threading the dropout rate + seed/offset into the config. The precise relaxed condition: drop `dropoutActive` from the force-decomposed disjunction and instead force-decompose only when dropout is active AND fusion can't carry it (no config / no seed-offset / fusion off). Concretely:
+
+```go
+	// Dropout can ride the fused path when we have a config to carry the rate+seed+offset and
+	// fusion is enabled; otherwise active dropout still forces the decomposed path.
+	fusedDropoutOK := dropoutActive && useFusion && fusedConfig != nil &&
+		fusedConfig.DropoutSeed != nil && fusedConfig.DropoutOffset != nil
+	forceDecomposed := wantCoefficients || scoreSoftCap > 0 || !useFusion ||
+		(dropoutActive && !fusedDropoutOK)
+	if forceDecomposed {
+		output, coefficients = decomposedFn()
+	} else {
+		// fused: when fusedDropoutOK, fusedConfig already carries DropoutRate/Seed/Offset, so
+		// BackendFusedScaledDotProductAttention selects the fmha*Dropout variant; on a backend
+		// without fused dropout it returns ErrNotImplemented and InternalFusedOpCaller falls back
+		// to decomposedFn (which applies dropout), so correctness is preserved either way.
+		...
+	}
+```
+The fused branch already forwards `fusedConfig` (from Task 4); when it carries `DropoutRate`/`DropoutSeed`/`DropoutOffset`, the go-xla backend (Contract C) selects the `fmhaSoftmaxDropout` variant, and the `ErrNotImplemented` fallback keeps CPU correct. The builder populates the dropout config fields from `b.dropoutRate` plus a seed/offset (derive the seed/offset from the scope's RNG the same way `layers.Dropout` does — grep `layers.Dropout` / the RNG state it reads, and reuse that source so fused and decomposed dropout are seeded identically for parity).
+
+**Files:**
+- Modify: `ml/layers/attention/attention.go` (relax the gate; `decomposedFn` unchanged — it already applies dropout at lines 248-250)
+- Modify: `core/graph/fused_ops.go` (extend the config helper to carry `DropoutRate`/`DropoutSeed`/`DropoutOffset`)
+- Modify: `ml/layers/attention/multiheadattention.go` (`doneInternal` populates the dropout config fields from `b.dropoutRate` + RNG seed/offset)
+- Test: `ml/layers/attention/fusion_test.go`
+
+**Interfaces:**
+- Consumes (Contract A, Stage 2): `ScaledDotProductAttentionConfig{ DropoutRate float64; DropoutSeed, DropoutOffset Value }`.
+- No new public builder method — `WithDropout` (existing) is the entry point; the change is internal to `Core`'s gate and the config population.
+
+- [ ] **Step 1: Write the failing test (CPU)**
+
+On CPU the fused dropout path is `ErrNotImplemented`, so the CPU test pins (a) the relaxed gate still produces correct decomposed dropout output (fallback), and (b) the gate compiles with the new condition. Add to `ml/layers/attention/fusion_test.go`:
+```go
+// TestFusedDropoutGateFallsBackOnCPU pins that with active dropout and fusion enabled, Core still
+// produces output on CPU (the fused dropout variant is ErrNotImplemented there, so it falls back to
+// the decomposed dropout path). Guards the relaxed gate. Dropout active requires a training scope.
+func TestFusedDropoutGateFallsBackOnCPU(t *testing.T) {
+	backend := testutil.BuildTestBackend()
+	const B, S, H, D = 1, 32, 2, 64
+	scale := 0.125
+	q := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 1), B, S, H, D)
+	k := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 2), B, S, H, D)
+	v := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 3), B, S, H, D)
+
+	// WithDropout is a builder method, so this S2 test uses the MultiHeadAttention builder on the
+	// pre-projected path, NOT the scope-free SimpleAttention helper.
+	flat := func(n *Node) *Node { d := n.Shape().Dimensions; return Reshape(n, d[0], d[1], d[2]*d[3]) }
+	store := model.NewStore()
+	exec := model.MustNewExec(backend, store, func(scope *model.Scope, qn, kn, vn *Node) []*Node {
+		scope = scope.WithTraining(true) // activate dropout; use this fork's training-scope API
+		out := MultiHeadAttention(scope, flat(qn), flat(kn), flat(vn), H, D).
+			WithPreProjected(true).WithQueryKeyScale(scale).
+			UseCausalMask().
+			WithDropout(Scalar(qn.Graph(), dtypes.Float32, 0.1)).
+			Done()
+		return []*Node{ReduceAllMax(Abs(ConvertDType(out, dtypes.Float32)))}
+	})
+	out := exec.MustCall(q, k, v)
+	require.False(t, math.IsNaN(float64(tensors.ToScalar[float32](out[0]))), "dropout fallback produced NaN")
+}
+```
+(Confirm the training-scope activation API in this fork — grep `IsDropoutActive` and `WithTraining`/`Training(` in `ml/layers` and `ml/model` to find how dropout is switched on; use the real call. `math` is already imported from Task 6.)
+
+- [ ] **Step 2: Run the test to verify it fails (or fails to compile)**
+
+Run: `go test ./ml/layers/attention/ -run TestFusedDropoutGateFallsBackOnCPU`
+Expected: FAIL — before the gate change, active dropout + the fused-config dropout fields are inconsistent (or the config fields do not yet populate). If the test passes immediately because the old gate already routes dropout to decomposed, change the assertion to also require, via a `backendSupportsFusion` branch, that on a fusion backend the fused dropout variant is attempted (the `[cuda]` Step 5 covers the real fused-path assertion; on CPU it must at least compile with the relaxed gate referencing `fusedConfig.DropoutSeed`).
+
+- [ ] **Step 3: Relax the gate and populate the dropout config**
+
+In `ml/layers/attention/attention.go`, replace the force-decomposed condition with the relaxed form shown in this task's prose (`fusedDropoutOK` + `forceDecomposed`). `decomposedFn` is unchanged (it already applies dropout at lines 248-250). Extend `core/graph/fused_ops.go`'s `NewFusedAttentionConfig` to also accept dropout rate + seed/offset nodes and set `DropoutRate`/`DropoutSeed`/`DropoutOffset`. In `doneInternal`, when `b.dropoutRate != nil` and dropout is active, populate those config fields from `b.dropoutRate` and the scope RNG seed/offset (reuse the same RNG source `layers.Dropout` reads so fused and decomposed seed identically).
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `go test ./ml/layers/attention/ -run TestFusedDropoutGateFallsBackOnCPU`
+Expected: PASS (CPU falls back to decomposed dropout; no NaN).
+
+- [ ] **Step 5: [cuda] Fused-dropout parity on the CUDA host**
+
+Add an `xla:cuda` dropout-parity case: run `Core` with active dropout twice with the SAME seed/offset and assert the fused output is deterministic and within statistical tolerance of the decomposed dropout (same seed) output. Run on the CUDA host:
+```bash
+GOMLX_BACKEND=xla:cuda \
+  go test ./ml/layers/attention/ -run 'TestFusedDropout' -v
+```
+Expected: PASS — the `fmhaSoftmaxDropout` variant runs; same-seed fused vs decomposed match within tolerance.
+
+- [ ] **Step 6: Run the full package on Mac**
+
+Run: `go build ./... && go test ./ml/layers/attention/...`
+Expected: PASS; CUDA/dropout-fused tests SKIP on CPU.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /Users/guygrigsby/projects/forks/gomlx
+git add core/graph/fused_ops.go ml/layers/attention/attention.go ml/layers/attention/multiheadattention.go ml/layers/attention/fusion_test.go
+git commit -m "attention: relax Core fused-branch gate to fuse with dropout
+
+Drop the blanket !dropoutActive force-decompose; Core now fuses with dropout when
+fusion is on and the config carries DropoutRate/Seed/Offset, selecting the
+fmha*Dropout variant. Backends without fused dropout return ErrNotImplemented and
+fall back to the decomposed dropout path, so CPU stays correct. Seed/offset reuse
+the layers.Dropout RNG source so fused and decomposed match for the same seed."
+```
+
+---
+
+## Stage 2 Verification Gate (Plan 03)
+
+Run after Tasks 8–9. Run on the Mac first; `[cuda]` lines on the CUDA host.
+
+- [ ] **Gate 1 — Mac (CPU) full package green**
+
+Run:
+```bash
+cd /Users/guygrigsby/projects/forks/gomlx
+go build ./...
+go test ./ml/layers/attention/...
+```
+Expected: PASS. `WithAttentionBias` decomposed bias and the relaxed dropout gate both fall back correctly on CPU; CUDA/dropout-fused tests SKIP.
+
+- [ ] **Gate 2 — [cuda] bias + dropout fused-parity green**
+
+Run (on the CUDA host):
+```bash
+GOMLX_BACKEND=xla:cuda \
+  go test ./ml/layers/attention/... -run 'TestCUDAFusionParity|TestWithAttentionBias|TestFusedDropout' -v
+```
+Expected: PASS — `fmhaScaleBiasSoftmax` and `fmhaSoftmaxDropout` variants run within tolerance.
+
+- [ ] **Gate 3 — Stop and report**
+
+All Stage 2 gates green → Contract D is fully satisfied (S1 + S2). Report gate output to Guy for manual diff review before any push.
 
 ---
 
 ## Self-Review (writing-plans)
 
-**Spec coverage (Contract D + scope items 1-5):**
-- Delete flash.go, preserve `repeatKVHeads` (relocated to `fusion_test.go`), state why deletion loses no behavior → Task 1. ✓
-- `UseFusion(enabled bool)`, default true in constructor, thread to `Core` via new trailing param, gate fused branch, update all Core call sites → Tasks 2-3. ✓ (Core param appended after `scoreSoftCap`, then `fusedConfig` after that in Task 4 — internally consistent; all 12 `attention_test.go` calls + `multiheadattention.go:446` + `fusion_test.go` calls updated.)
-- `WithSeqLens` → `ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`, mutually exclusive with `queryKeyMatrixMask` (both orders) → Task 4. ✓
-- `SimpleAttention` preconfiguring `WithPreProjected(true).WithQueryKeyScale(scale)` → Task 5. ✓
-- `backendSupportsFusion` probe replacing `isCUDABackend`; loop `TestOfficialBackends`; `testutil.GetOfficialBackend`; one `xla:cuda` parity test → Tasks 5-6. ✓
-- Bench: rename `TestFusionThroughput`, same code path via `UseFusion`, `FinalizeAll`, `for range iters`, test-flag gating → Task 7. ✓
-- CUDA-execution tests marked `[trig]`; CPU-testable items enumerated → present per task and in the gate. ✓
+**Spec coverage (Contract D + the four decided changes):**
+- **Rename `UseFusion → WithFusion`:** builder method, all test names (`TestBuilderWithFusionDefaultsTrue`, `TestCoreUseFusionFalseMatchesDecomposed` keeps `UseFusion` only in the *internal* identifier per the param name), and prose use `WithFusion`. The `Core` param stays `useFusion bool` (plain bool, appended after `scoreSoftCap`). → Tasks 2-3, bench Task 7. ✓
+- **Real Core call-site count:** grepped — **1 production caller** (`multiheadattention.go:446`) + **15** `Core(scope ...)` calls in `attention_test.go` (lines 28, 36, 79, 101, 102, 132, 161, 188, 228, 230, 286, 287, 323, 324, 366) + the new `fusion_test.go` calls. Stated in File Structure and Tasks 2/4/8. The earlier "12" figure was wrong and is removed. ✓
+- **Stage tags:** every task carries `[S1]` or `[S2]`. S1 = Tasks 0-7 (refactor, no variants); S2 = Tasks 8-9 (variants). S1 ordered first, S2 last, with a Stage 1 gate between them. ✓
+- Delete flash.go's `FlashAttention`; **retain `naiveCausalAttention` in-package** (non-test `fusion.go`) because scope-free `SimpleAttention`'s decomposed fallback depends on it at runtime — do NOT move it to a `_test.go`; only `naiveGQAReference`/`repeatKVHeads` (test-only) move to `fusion_test.go`. **Preserve `repeatKVHeads`** (relocated, pinned by `TestRepeatKVHeads`). State why deletion loses no behavior → Task 1 [S1]. ✓
+- `WithFusion(enabled bool)`, default true in constructor, thread to `Core` via trailing `useFusion bool`, gate fused branch, update all Core call sites → Tasks 2-3 [S1]. ✓
+- `WithSeqLens` → `ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen` only (the only S1 config fields), mutually exclusive with `queryKeyMatrixMask` (both orders) → Task 4 [S1]. ✓
+- `SimpleAttention` is now **scope-free and returns a `*Node`** (Contract D, decided 2026-06-29 option A), implemented directly over `InternalFusedOpCaller(fused, decomposed)` — fused closure = `BackendFusedScaledDotProductAttention(...,numHeads,numHeads,AxesLayoutBSHD,scale,true,nil)`, decomposed closure = the retained `naiveCausalAttention`. It lives in non-test `fusion.go`, NOT the builder. DIVERGES from Jan's scope-taking, builder-returning sketch; flagged in the PR. lmkit-go (scope-free) is its first caller → Task 5 [S1]. ✓
+- `backendSupportsFusion` probe replacing `isCUDABackend`; loop `TestOfficialBackends`; `testutil.GetOfficialBackend`; one `xla:cuda` parity test → Tasks 5-6 [S1]. ✓
+- Bench: rename `TestFusionThroughput`, single `WithFusion`-toggled code path, `FinalizeAll`, `for range iters`, flags-not-env → Task 7 [S1]. ✓
+- **`WithAttentionBias(bias *Node)` → `config.Bias`, explicitly DISTINCT from `UseProjectionBias`** (independent, may both be set; the task spells out the difference) → Task 8 [S2]. ✓
+- **Relax `Core`'s `!dropoutActive` fused-branch gate:** exact current condition quoted (`attention.go:265` + `dropoutActive` at line 195); precise relaxed condition written (`fusedDropoutOK`/`forceDecomposed`); fuses with dropout when the config carries rate+seed+offset, ErrNotImplemented fallback preserves CPU correctness → Task 9 [S2]. ✓
+- S2 tasks note their dependency on compute Stage 2 config fields (`Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`); Task 8 Step 0 / Task 9 verify them before code. ✓
+- CUDA-execution tests marked `[cuda]`; CPU-testable items enumerated → present per task and in both gates. ✓
 
-**Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N". Two flagged uncertainties (the `*Node → compute.Value` config boundary in Task 4, the `FinalizeAll` finalizer name in Task 7) carry an explicit grep-and-resolve instruction with a concrete fallback, not a hand-wave — acceptable because the implementer is told exactly what to check and what to do in either branch.
+**Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N". Flagged uncertainties — the `*Node → compute.Value` config boundary (Task 4), the `FinalizeAll` finalizer name (Task 7), the bias `*Node` wiring into `Core`'s decomposed path (Task 8), the training-scope/RNG-seed API for fused dropout (Task 9) — each carry an explicit grep-and-resolve instruction with a concrete fallback, not a hand-wave. Acceptable: the implementer is told exactly what to check and what to do either way.
 
-**Type consistency:** `Core` signature is consistent across Tasks 2 (`+useFusion bool`) and 4 (`+fusedConfig *compute.ScaledDotProductAttentionConfig`), and every call-site-update step references the same trailing-arg shape. `UseFusion`/`WithSeqLens`/`SimpleAttention`/`GetOfficialBackend`/`backendSupportsFusion`/`NewSeqLenAttentionConfig` names match between their producing task and consuming tasks. `repeatKVHeads`/`naiveCausalAttention`/`naiveGQAReference`/`randFlat` relocate once (Task 1) and are referenced thereafter.
+**Type consistency:** `Core`'s signature grows monotonically — Task 2 appends `useFusion bool`, Task 4 appends `fusedConfig *compute.ScaledDotProductAttentionConfig`, Task 8 appends `biasNode *Node` — and every call-site-update step references the same trailing-arg shape at that point in the plan. `WithFusion`/`WithSeqLens`/`SimpleAttention`/`GetOfficialBackend`/`backendSupportsFusion`/`NewSeqLenAttentionConfig`/`NewFusedAttentionConfig`/`WithAttentionBias` names match between producing and consuming tasks. `SimpleAttention` is a scope-free package func returning `*Node` (Task 5, in `fusion.go`), consistent between Contract D, the File Structure, and Task 5's interface/test. `naiveCausalAttention` lands once in non-test `fusion.go` (Task 1) and is referenced at runtime by `SimpleAttention` (Task 5) and by tests; `repeatKVHeads`/`naiveGQAReference` relocate once to `fusion_test.go` (Task 1); `randFlat` is added to `fusion_test.go` (Task 2) and referenced thereafter.
 
-**Known residual risk to flag at execution:** Task 4's `NewSeqLenAttentionConfig` reaches into `node.outputOps[0]`; confirm at implementation that `outputOps` is the field name on `*Node` in this fork (grep `outputOps` in `core/graph/fused_ops.go` — it is used there, so the helper compiles in the same package). This is the only place the plan touches `core/graph` rather than `ml/layers/attention`.
+**Known residual risk to flag at execution:**
+- Task 4/8's `NewSeqLenAttentionConfig`/`NewFusedAttentionConfig` reach into `node.outputOps[0]`; confirm `outputOps` is the field name on `*Node` in this fork (grep `outputOps` in `core/graph/fused_ops.go` — it is used there, so the helpers compile in the same package). The only places the plan touches `core/graph` rather than `ml/layers/attention`.
+- Task 9's fused-dropout seed/offset must come from the same RNG source `layers.Dropout` reads, or fused vs decomposed dropout will not match for a given seed; the `[cuda]` parity test (Task 9 Step 5) is the arbiter.
