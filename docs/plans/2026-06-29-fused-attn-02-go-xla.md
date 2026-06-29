@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Read the shared contract first: `docs/plans/2026-06-29-fused-attn-00-contract.md`.
 
-**Goal:** Land the `go-xla` half of fused-attention upstreaming (PR gomlx/go-xla#37): a typed `CustomCallV2`, full cuDNN fmha variant dispatch (bias / dropout / FP8), and seqlen padding masks — keeping every `__cudnn$fmha*` detail inside `go-xla`.
+**Goal:** Land the `go-xla` half of fused-attention upstreaming (PR gomlx/go-xla#37): a typed `CustomCallV2`, cuDNN fmha variant dispatch (bias / dropout / bias+dropout, all bf16), and seqlen padding masks — keeping every `__cudnn$fmha*` detail inside `go-xla`. FP8 is paused (no local sm_8.9+ hardware); fp8 input falls to `ErrNotImplemented` and is handed to janpfeifer — see Contract C.
 
 **Architecture:** This plan implements Contract B (CustomCallV2) and Contract C (fmha variant dispatch + seqlen masking) from the shared contract, and consumes Contract A (the `compute.ScaledDotProductAttentionConfig` fields produced by plan 01). The string-layout `CustomCall` is replaced by a `[][]int`-layout `CustomCallV2` that renders MLIR `dense<...>` internally; `compute/xla/flash.go` rewires onto it and grows a config-driven target selector. Nothing flash-/CUDA-specific leaks above the backend: callers still see only "FusedSDPA: supported or `ErrNotImplemented`".
 
@@ -370,7 +370,7 @@ git commit -m "compute/xla: typed CustomCallV2 with [][]int layouts, render MLIR
 
 ## Task 2: Rewire `flash.go` onto config-driven targets and backend_config (Contract C scaffolding)
 
-Restructure `flash.go` so the cuDNN target and `mask_type` come from the config rather than hardcoded constants. This task introduces the dispatch seam (functions + a variant struct) and routes the existing causal-bf16 path through it, with no behavior change yet. Tasks 3 and 4 add the bias/dropout/FP8/seqlen branches onto this seam.
+Restructure `flash.go` so the cuDNN target and `mask_type` come from the config rather than hardcoded constants. This task introduces the dispatch seam (functions + a variant struct) and routes the existing causal-bf16 path through it, with no behavior change yet. Tasks 3 and 4 add the bias/dropout/seqlen branches onto this seam.
 
 **Files:**
 - Modify: `compute/xla/flash.go`
@@ -476,8 +476,9 @@ const (
 	fmhaSoftmaxDropoutBwd           = "__cudnn$fmhaSoftmaxDropoutBackward"
 	fmhaScaleBiasSoftmaxDropoutFwd  = "__cudnn$fmhaScaleBiasSoftmaxDropout"
 	fmhaScaleBiasSoftmaxDropoutBwd  = "__cudnn$fmhaScaleBiasSoftmaxDropoutBackward"
-	fmhaSoftmaxF8Fwd                = "__cudnn$fmhaSoftmaxF8"
-	fmhaSoftmaxF8Bwd                = "__cudnn$fmhaSoftmaxBackwardF8"
+	// FP8 targets (__cudnn$fmhaSoftmaxF8 / …BackwardF8) are intentionally NOT defined:
+	// fp8 fmha is paused (no local sm_8.9+ hardware to test). fp8 input dtype falls to
+	// ErrNotImplemented in selectFMHAVariant. Add the row here when wiring fp8 on Hopper/Ada.
 )
 
 // fmhaVariant captures the config-derived custom-call selection: the fwd/bwd targets, the
@@ -490,8 +491,9 @@ type fmhaVariant struct {
 }
 
 // selectFMHAVariant maps the q/k/v dtype and config to a cuDNN variant, following Contract C
-// precedence (FP8 > bias+dropout > bias > dropout > standard). Dtype gate: standard/bias/
-// dropout accept f16/bf16 only; F8 accept e4m3fn/e5m2 only. Anything else -> ErrNotImplemented.
+// precedence (bias+dropout > bias > dropout > standard). Dtype gate: all wired variants accept
+// f16/bf16 only. Anything else (incl. fp8 e4m3fn/e5m2 — paused, no local hardware) ->
+// ErrNotImplemented, and the caller falls back to the decomposed path.
 // mask_type derives from causal + seqlens: PADDING_CAUSAL (both), PADDING (seqlens only),
 // CAUSAL (causal only), NO_MASK (neither).
 func selectFMHAVariant(op string, qkvDType dtypes.DType, causal bool,
@@ -504,16 +506,9 @@ func selectFMHAVariant(op string, qkvDType dtypes.DType, causal bool,
 	}
 	hasSeqLens := cfg != nil && cfg.QuerySeqLen != nil && cfg.KeyValueSeqLen != nil
 
-	isF8 := qkvDType == dtypes.F8E4M3FN || qkvDType == dtypes.F8E5M2
 	isHalf := qkvDType == dtypes.Float16 || qkvDType == dtypes.BFloat16
 
 	switch {
-	case isF8:
-		if hasBias || dropout > 0 {
-			return v, errors.Wrapf(compute.ErrNotImplemented,
-				"%s: cuDNN FP8 fmha has no bias/dropout variant", op)
-		}
-		v.fwdTarget, v.bwdTarget = fmhaSoftmaxF8Fwd, fmhaSoftmaxF8Bwd
 	case isHalf:
 		switch {
 		case hasBias && dropout > 0:
@@ -526,8 +521,9 @@ func selectFMHAVariant(op string, qkvDType dtypes.DType, causal bool,
 			v.fwdTarget, v.bwdTarget = fmhaSoftmaxFwd, fmhaSoftmaxBwd
 		}
 	default:
+		// fp8 (e4m3fn/e5m2) lands here too: paused, not wired. NotImplemented -> decomposed.
 		return v, errors.Wrapf(compute.ErrNotImplemented,
-			"%s: cuDNN fmha needs f16/bf16 (or e4m3fn/e5m2 for FP8), got %s", op, qkvDType)
+			"%s: cuDNN fmha needs f16/bf16, got %s", op, qkvDType)
 	}
 
 	switch {
@@ -635,13 +631,14 @@ git commit -m "compute/xla: config-driven fmha target + mask_type selection seam
 
 ---
 
-## Task 3: Bias, dropout, and FP8 operand sets (Contract C)
+## Task 3: Bias, dropout, and seqlen operand sets (Contract C)
 
-Build the right operand list per variant: bias adds a `[B,H,S,Skv]` bias operand; dropout adds the seed/offset operands and threads `dropout_rate` into the config; FP8 routes through the F8 targets. The dtype gate already lives in `selectFMHAVariant` (Task 2); this task wires the operands and layouts.
+Build the right operand list per variant: bias adds a `[B,H,S,Skv]` bias operand; dropout adds the seed/offset operands and threads `dropout_rate` into the config; seqlens append the query/kv length operands. The dtype gate already lives in `selectFMHAVariant` (Task 2); this task wires the operands and layouts. (FP8 is paused — `selectFMHAVariant` returns `ErrNotImplemented` for fp8 before any operand work, so there is no F8 operand set here.)
 
 **Files:**
 - Modify: `compute/xla/flash.go`
-- Test: `compute/xla/flash_variants_cuda_test.go` (create) — **[trig]** execution tests, one per supported variant
+- Test: `compute/xla/flash_variants_cuda_test.go` (create) — **[trig]** execution tests, one per wired variant (bias, dropout)
+- Test: `compute/xla/flash_dispatch_test.go` (the CPU dispatch-unit-test file from Task 2) — add the fp8-paused `TestSelectFMHAVariant_FP8NotImplemented` here (CPU, no cuda)
 
 **Interfaces:**
 - Consumes: `fmhaVariant` (Task 2); `cfg.Bias`, `cfg.DropoutSeed`, `cfg.DropoutOffset` (Contract A); `f.customCall` ([][]int layouts, Task 1).
@@ -682,10 +679,19 @@ func TestFMHAVariant_Dropout_trig(t *testing.T) {
 	assertFiniteBSHD(t, out)
 }
 
-func TestFMHAVariant_FP8_trig(t *testing.T) {
-	be := getFusionBackend(t)
-	out := runFusedFwd(t, be, dtypes.F8E4M3FN, true, nil)
-	assertFiniteBSHD(t, out)
+```
+
+And in `compute/xla/flash_dispatch_test.go` (CPU file, Mac-runnable), pin the fp8-paused seam:
+
+```go
+// fp8 is paused (no local sm_8.9+ hardware). Pin the seam: an fp8 dtype must select
+// no variant and surface ErrNotImplemented so the caller falls back to decomposed.
+// Pure unit test on selectFMHAVariant — CPU, runs on the Mac (no [trig]).
+func TestSelectFMHAVariant_FP8NotImplemented(t *testing.T) {
+	_, err := selectFMHAVariant("fmha", dtypes.F8E4M3FN, true, nil)
+	require.True(t, compute.IsNotImplemented(err), "fp8 must be NotImplemented (paused), got %v", err)
+	_, err = selectFMHAVariant("fmha", dtypes.F8E5M2, true, nil)
+	require.True(t, compute.IsNotImplemented(err), "fp8 e5m2 must be NotImplemented (paused), got %v", err)
 }
 ```
 
@@ -730,24 +736,14 @@ In `FusedScaledDotProductAttention`, after casting q/k/v, assemble operands and 
 		operandLayouts, []shapes.Shape{bhsd, stats, scratch}, fwdResultLayouts, operands...)
 ```
 
-For FP8, skip the `f.bf16` casts on q/k/v (keep the input f8 dtype). Gate the cast: only cast to bf16 when `!isF8Variant(variant)`. Add a small predicate:
-
-```go
-// f8Variant reports whether the variant uses the FP8 cuDNN targets (no bf16 cast).
-func f8Variant(v fmhaVariant) bool { return v.fwdTarget == fmhaSoftmaxF8Fwd }
-```
-
-and branch the casts:
+All wired variants are bf16, so q/k/v always cast to bf16 (fp8 is paused — `selectFMHAVariant`
+already returned `ErrNotImplemented` before reaching here, so this method only runs for half dtypes):
 
 ```go
 	var q, k, v2 compute.Value
-	if f8Variant(variant) {
-		q, k, v2 = query, key, value
-	} else {
-		if q, err = f.bf16(query); err != nil { return nil, nil, err }
-		if k, err = f.bf16(key); err != nil { return nil, nil, err }
-		if v2, err = f.bf16(value); err != nil { return nil, nil, err }
-	}
+	if q, err = f.bf16(query); err != nil { return nil, nil, err }
+	if k, err = f.bf16(key); err != nil { return nil, nil, err }
+	if v2, err = f.bf16(value); err != nil { return nil, nil, err }
 ```
 
 (rename the local `v` for value to `v2` to avoid shadowing `variant`'s short name if present; keep names consistent with the existing code's `q, k, v`).
@@ -784,7 +780,7 @@ In `FusedScaledDotProductAttentionVJP`, build the backward operands appending th
 gputex run "fmha-variants" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla/ -run 'TestFMHAVariant_.*_trig' -v
 ```
 
-Expected: PASS for the variants cuDNN supports on the trig GPU. If FP8 is unsupported on the card, the test should `t.Skip` (cuDNN returns a compile error caught and surfaced as `ErrNotImplemented`); document which variants ran green.
+Expected: PASS for the variants cuDNN supports on the trig GPU (bias, dropout). Document which variants ran green.
 
 - [ ] **Step 6: Confirm the Mac CPU build/test still green**
 
@@ -800,7 +796,7 @@ Expected: `compute/xla` builds; `pjrt` fails only on `CustomCall` (Task 5).
 
 ```bash
 git add compute/xla/flash.go compute/xla/flash_variants_cuda_test.go
-git commit -m "compute/xla: per-variant fmha operand sets (bias, dropout, FP8)"
+git commit -m "compute/xla: per-variant fmha operand sets (bias, dropout, seqlens); fp8 paused as NotImplemented"
 ```
 
 ---
@@ -862,7 +858,7 @@ The gate must still reject an explicit materialized `mask` (seqlens replace it) 
 
 ```go
 // flashSupported reports whether the cuDNN flash path can serve this call. cuDNN fMHA here is
-// f16/bf16 (or e4m3fn/e5m2 FP8), BSHD-layout, equal-head, on a cuda plugin. Causality and
+// f16/bf16 (fp8 paused), BSHD-layout, equal-head, on a cuda plugin. Causality and
 // per-batch seqlen padding are supported (mask_type derives from them in selectFMHAVariant);
 // an explicit materialized mask is not (use seqlens instead). Anything else -> ErrNotImplemented.
 func (f *Function) flashSupported(op string, mask compute.Value, numHeads, numKVHeads int, axesLayout compute.AxesLayout, causal bool, options *compute.ScaledDotProductAttentionConfig) error {
@@ -1009,7 +1005,7 @@ On trig, branch synced, native build:
 gputex run "fmha-gate" -- env GOMLX_BACKEND=xla:cuda go test ./compute/xla ./pjrt -run 'FMHA|Flash' -plugin cuda -v
 ```
 
-Expected: PASS for each variant present in the dtype/variant matrix (standard causal, bias, dropout, seqlen padding-causal, and FP8 where the card supports it). Variants unsupported by the installed cuDNN/card `t.Skip` rather than fail — note which ran green.
+Expected: PASS for each wired variant (standard causal, bias, dropout, bias+dropout, seqlen padding-causal). Variants unsupported by the installed cuDNN/card `t.Skip` rather than fail — note which ran green. (fp8 is not in this matrix — paused.)
 
 - [ ] **Downstream integration unblocked:** confirm `compute/xla` exports nothing CUDA-specific above the backend (the only public surface change is `stablehlo.CustomCallV2`; `flash.go`'s methods keep their Contract-A signatures). Plan 03 (gomlx) consumes this via the local `replace`.
 
@@ -1019,11 +1015,11 @@ Expected: PASS for each variant present in the dtype/variant matrix (standard ca
 
 **Spec coverage** (against contract Contracts B, C and the SCOPE list):
 - Contract B `CustomCallV2` + internal MLIR rendering + remove old `CustomCall` + rewire `ops.go`/`flash.go` → Task 1. CPU layout-rendering unit test → Task 1 Step 1.
-- Contract C variant dispatch (FP8 / Bias+Dropout / Bias / Dropout / Softmax precedence) → Task 2 (`selectFMHAVariant`). Dtype gate (f16/bf16 vs e4m3/e5m2 else ErrNotImplemented) → Task 2. Per-variant operand sets (bias operand, dropout seed/offset + rate, FP8 no-cast) → Task 3. Seqlen operands + `mask_type` CAUSAL/PADDING/PADDING_CAUSAL/NO_MASK → Task 2 (mask_type) + Task 3 (operands) + Task 4 (gate relaxation). VJP mirrors operands → Task 3 Step 4.
+- Contract C variant dispatch (Bias+Dropout / Bias / Dropout / Softmax precedence) → Task 2 (`selectFMHAVariant`). Dtype gate (f16/bf16 only, else ErrNotImplemented incl. paused fp8) → Task 2, pinned by `TestSelectFMHAVariant_FP8NotImplemented` (Task 3, CPU). Per-variant operand sets (bias operand, dropout seed/offset + rate) → Task 3. Seqlen operands + `mask_type` CAUSAL/PADDING/PADDING_CAUSAL/NO_MASK → Task 2 (mask_type) + Task 3 (operands) + Task 4 (gate relaxation). VJP mirrors operands → Task 3 Step 4.
 - Test fix `client.Plugin().IsCUDA()` → Task 5.
 - Task 0 sync is first and non-skippable.
 - [trig] markers present on every cuDNN-execution test; layout-rendering and dispatch tests are CPU-only on the Mac.
 
 **Placeholder scan:** no TBD/TODO; every code step shows full code. The Task 3/4 test-helper harness defers to the package's existing `_cuda_test.go` harness (grep instruction given) rather than inventing one — this is the one place exact code depends on the synced tree's existing helpers; flagged explicitly so the implementer reuses, not guesses.
 
-**Type consistency:** `fmhaVariant`, `selectFMHAVariant`, `flashBackendConfigV`, `flashFwdBackendConfig(…, v fmhaVariant)`, `flashBwdBackendConfig(…, v fmhaVariant)`, `f8Variant`, `dtypeOf`, `renderLayouts`, `CustomCallV2`, and the `customCall` wrapper signature (dropped `apiVersion`, `[][]int` layouts) are used identically across Tasks 1–5. `flashSupported` gains the trailing `options` param in Task 2 and uses it in Task 4 — consistent. dtype names `dtypes.F8E4M3FN`/`dtypes.F8E5M2`/`dtypes.Float16`/`dtypes.BFloat16` match the compute module enum.
+**Type consistency:** `fmhaVariant`, `selectFMHAVariant`, `flashBackendConfigV`, `flashFwdBackendConfig(…, v fmhaVariant)`, `flashBwdBackendConfig(…, v fmhaVariant)`, `dtypeOf`, `renderLayouts`, `CustomCallV2`, and the `customCall` wrapper signature (dropped `apiVersion`, `[][]int` layouts) are used identically across Tasks 1–5. `flashSupported` gains the trailing `options` param in Task 2 and uses it in Task 4 — consistent. dtype names `dtypes.Float16`/`dtypes.BFloat16` (and `dtypes.F8E4M3FN`/`dtypes.F8E5M2`, used only by the fp8-paused NotImplemented test) match the compute module enum.

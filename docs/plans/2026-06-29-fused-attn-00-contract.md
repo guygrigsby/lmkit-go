@@ -92,13 +92,14 @@ The existing MLIR `dense<[...]>` string rendering moves *inside* CustomCallV2 (b
 
 | Condition (first match wins) | Forward target | Backward target |
 |---|---|---|
-| FP8 input dtype | `__cudnn$fmhaSoftmaxF8` | `__cudnn$fmhaSoftmaxBackwardF8` |
 | Bias set + DropoutRate>0 | `__cudnn$fmhaScaleBiasSoftmaxDropout` | `…Backward` |
 | Bias set | `__cudnn$fmhaScaleBiasSoftmax` | `…Backward` |
 | DropoutRate>0 | `__cudnn$fmhaSoftmaxDropout` | `…Backward` |
 | else | `__cudnn$fmhaSoftmax` | `__cudnn$fmhaSoftmaxBackward` |
 
-Dtype gate: standard/bias/dropout variants accept `float16`/`bfloat16` only; F8 variants accept `float8_e4m3fn`/`float8_e5m2`. Anything else → `ErrNotImplemented`.
+Dtype gate: all wired variants accept `float16`/`bfloat16` only. Anything else → `ErrNotImplemented`.
+
+**FP8 is paused, not wired** (decided 2026-06-29). The only fp8-capable hardware is Hopper/Ada (sm_8.9+); trig is an RTX 3070 Ti (sm_8.6, Ampere) which has no fp8 tensor cores, so the F8 fmha path cannot execute on local hardware. Rather than ship an untested kernel, fp8 input dtype (`float8_e4m3fn`/`float8_e5m2`) falls through the dtype gate to `ErrNotImplemented` → decomposed fallback. The dispatch table above is the extension point: adding the `__cudnn$fmhaSoftmaxF8` / `…BackwardF8` row later (on a Hopper box, or by janpfeifer) is a pure addition, not a refactor. PR note hands fp8 to Jan explicitly.
 
 Masking: `mask_type` in backend_config is `CAUSAL` (causal, no seqlens), `PADDING` (seqlens, no causal), `PADDING_CAUSAL` (both), or `NO_MASK`. Seqlen tensors are appended as operands when `mask_type` includes PADDING.
 
