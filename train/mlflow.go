@@ -17,6 +17,7 @@ import (
 // tracking error is swallowed — instrumentation never fails or stalls training.
 type mlflowLogger struct {
 	c     *mlflow.Client
+	a     *mlflow.AsyncLogger
 	runID string
 }
 
@@ -42,7 +43,7 @@ func newMLflowLogger(cfg Config, mcfg lmodel.Config, nParams int) *mlflowLogger 
 	if err != nil {
 		return nil
 	}
-	l := &mlflowLogger{c: c, runID: run.Info.RunID}
+	l := &mlflowLogger{c: c, a: c.NewAsyncLogger(), runID: run.Info.RunID}
 	params := []mlflow.Param{
 		{Key: "framework", Value: "lmkit-go"},
 		{Key: "params", Value: strconv.Itoa(nParams)},
@@ -82,9 +83,11 @@ func (l *mlflowLogger) log(fields map[string]any) {
 	if !ok || len(ms) == 0 {
 		return
 	}
-	ctx, cancel := mlCtx()
-	defer cancel()
-	_ = l.c.LogBatch(ctx, l.runID, ms, nil, nil)
+	for _, m := range ms {
+		// Fire-and-forget; the worker batches and flushes. Blocks only if the
+		// buffer is full, which on a down server self-limits the backlog.
+		_ = l.a.LogMetric(context.Background(), l.runID, m.Key, m.Value, m.Timestamp, m.Step)
+	}
 }
 
 // fieldMetrics turns a metrics.jsonl event map into MLflow metrics: every numeric
@@ -122,6 +125,7 @@ func (l *mlflowLogger) finish(status mlflow.RunStatus) {
 	if l == nil {
 		return
 	}
+	_ = l.a.Close() // flush buffered metrics before the run goes terminal
 	ctx, cancel := mlCtx()
 	defer cancel()
 	_ = l.c.UpdateRun(ctx, l.runID, status, time.Now().UnixMilli())

@@ -1,7 +1,11 @@
 package train
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 
 	lmodel "github.com/guygrigsby/lmkit-go/model"
@@ -72,6 +76,58 @@ func TestMLflowDisabledWithoutEnv(t *testing.T) {
 	l.finishDone()
 	l.finishFailed()
 	l.finishKilled()
+}
+
+// TestMLflowAsyncFlush drives the real path against a fake MLflow server: a logged
+// train event's metrics must reach runs/log-batch, and finishDone must flush the
+// async logger before the run goes terminal.
+func TestMLflowAsyncFlush(t *testing.T) {
+	var mu sync.Mutex
+	gotKeys := map[string]bool{}
+	var updated bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/2.0/mlflow/experiments/get-by-name":
+			json.NewEncoder(w).Encode(map[string]any{"experiment": map[string]string{"experiment_id": "1"}})
+		case r.URL.Path == "/api/2.0/mlflow/runs/create":
+			json.NewEncoder(w).Encode(map[string]any{"run": map[string]any{"info": map[string]string{"run_id": "run1"}}})
+		case r.URL.Path == "/api/2.0/mlflow/runs/log-batch":
+			var body struct {
+				Metrics []struct {
+					Key string `json:"key"`
+				} `json:"metrics"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			for _, m := range body.Metrics {
+				gotKeys[m.Key] = true
+			}
+			mu.Unlock()
+		case r.URL.Path == "/api/2.0/mlflow/runs/update":
+			mu.Lock()
+			updated = true
+			mu.Unlock()
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("MLFLOW_TRACKING_URI", srv.URL)
+	l := newMLflowLogger(Config{OutDir: "/x/lm-100m-en/out"}, lmodel.Config{}, 1)
+	if l == nil {
+		t.Fatal("logger nil with MLFLOW_TRACKING_URI set")
+	}
+	l.log(map[string]any{"event": "train", "step": int64(7), "train_loss": 2.5})
+	l.finishDone() // flushes the async logger, then marks the run finished
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !gotKeys["train_loss"] {
+		t.Errorf("train_loss metric never reached log-batch; got %v", gotKeys)
+	}
+	if !updated {
+		t.Error("runs/update never called")
+	}
 }
 
 func TestExperimentName(t *testing.T) {
