@@ -3,10 +3,10 @@ package model
 import (
 	"math"
 
+	"github.com/gomlx/compute"
 	"github.com/gomlx/compute/dtypes"
 	g "github.com/gomlx/gomlx/core/graph"
 	"github.com/gomlx/gomlx/core/tensors"
-	"github.com/gomlx/gomlx/ml/layers/attention"
 )
 
 // UseFlashAttention selects the cuDNN flash-attention path for bf16 (CUDA) compute. When false,
@@ -41,32 +41,40 @@ func Attention(cfg Config, x, wQ, wK, wV, wO *g.Node, positions []int) *g.Node {
 
 	var out *g.Node // [B,T,nH,hd]
 	if UseFlashAttention && q.DType() == dtypes.BFloat16 {
-		// bf16 (CUDA) compute path: cuDNN flash attention, scores never materialized.
-		// Off-GPU it transparently falls back to a decomposed attention. q,k,v are
-		// [B,T,nH,hd] (BSHD); kv already repeated to nH above.
-		out = attention.FlashAttention(q, k, v, scale)
+		// bf16 fused compute path: backend fused attention (scores never materialized)
+		// when supported; InternalFusedOpCaller falls back to the decomposed path off-GPU.
+		// q,k,v are [B,T,nH,hd] (BSHD), kv already repeated to nH above. Causal.
+		out = g.InternalFusedOpCaller(
+			func() *g.Node {
+				return g.BackendFusedScaledDotProductAttention(
+					q, k, v, nil, nH, nH, compute.AxesLayoutBSHD, scale, true, nil)
+			},
+			func() *g.Node { return decomposedAttention(q, k, v, scale) },
+		)
 	} else {
-		// Decomposed path (PyTorch-parity tested in fp32): scaled q·kᵀ, causal mask, fp32
-		// softmax, value aggregation. scores[B,nH,T,S] = q·kᵀ / sqrt(hd), q,k as [B,T,nH,hd].
-		scores := g.Einsum("btnh,bsnh->bnts", q, k)
-		scores = g.MulScalar(scores, float32(scale))
-		// causalMask is a host fp32 constant; cast to scores' dtype so the bf16 compute path
-		// does not mix dtypes in the Add. No-op when scores is fp32.
-		scores = g.Add(scores, g.ConvertDType(causalMask(x.Graph(), tt), scores.DType())) // [1,1,T,T] broadcasts
-		// softmax in fp32 for stability/fidelity; downcast back to scores' dtype.
-		sdt := scores.DType()
-		sf := scores
-		if sdt != dtypes.Float32 {
-			sf = g.ConvertDType(scores, dtypes.Float32)
-		}
-		probs := g.Softmax(sf, -1) // softmax over S (key) axis
-		if sdt != dtypes.Float32 {
-			probs = g.ConvertDType(probs, sdt)
-		}
-		out = g.Einsum("bnts,bsnh->btnh", probs, v)
+		out = decomposedAttention(q, k, v, scale)
 	}
 	merged := g.Reshape(out, b, tt, nH*hd) // [B,T,nH*hd]
 	return g.MatMul(merged, wO)            // [B,T,Hidden]
+}
+
+// decomposedAttention is the fp32-parity reference path: scaled q·kᵀ, causal mask,
+// fp32 softmax, value aggregation. q,k,v are [B,T,nH,hd] (BSHD), equal heads.
+func decomposedAttention(q, k, v *g.Node, scale float64) *g.Node {
+	tt := q.Shape().Dimensions[1]
+	scores := g.Einsum("btnh,bsnh->bnts", q, k)
+	scores = g.MulScalar(scores, float32(scale))
+	scores = g.Add(scores, g.ConvertDType(causalMask(q.Graph(), tt), scores.DType()))
+	sdt := scores.DType()
+	sf := scores
+	if sdt != dtypes.Float32 {
+		sf = g.ConvertDType(scores, dtypes.Float32)
+	}
+	probs := g.Softmax(sf, -1)
+	if sdt != dtypes.Float32 {
+		probs = g.ConvertDType(probs, sdt)
+	}
+	return g.Einsum("bnts,bsnh->btnh", probs, v)
 }
 
 // repeatKV expands [B,T,nKV,hd] to [B,T,nKV*rep,hd] by repeating each KV head rep
