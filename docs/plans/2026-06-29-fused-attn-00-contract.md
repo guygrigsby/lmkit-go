@@ -29,10 +29,10 @@ The work ships in two stages. **Do Stage 1 in full — review — then Stage 2.*
 - lmkit-go: migrate `model/attention.go` `FlashAttention(...)` → `InternalFusedOpCaller(fused, decomposed)` over the scope-free graph primitives (the deletion in gomlx breaks this build; same stage). See Contract F.
 - go-huggingface: thread seqlens into transformer attention (kept in-scope per Guy 2026-06-29, though Jan offered to take it).
 
-**Stage 2 — added variants: bias, dropout, bias+dropout (all bf16). FP8 stays paused.**
-- compute: add `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset` fields + reference + direct unit tests.
-- go-xla: `selectFMHAVariant` bias/dropout/bias+dropout branches; per-variant operand sets; `[cuda]` exec tests.
-- gomlx: new `WithAttentionBias(*Node)` (distinct from the existing `UseProjectionBias`); **relax `Core`'s `!dropoutActive` fused-branch gate** so it fuses with dropout when the backend supports fused dropout; thread bias + dropout seed/offset into the config.
+**Stage 2 — additive attention bias only (bf16). Dropout, bias+dropout, and FP8 are all CUT (decided 2026-06-30): no caller needs them, and fused dropout has no local use. They stay `NotImplemented` seams.**
+- compute: add the `Bias` field + reference (additive before softmax) + direct unit test. NO dropout fields.
+- go-xla: `selectFMHAVariant` adds the bias branch (`__cudnn$fmhaScaleBiasSoftmax`/`…Backward`); bias operand set; `[cuda]` exec test. NO dropout/bias+dropout targets.
+- gomlx: new `WithAttentionBias(*Node)` (distinct from the existing `UseProjectionBias`); thread bias to `Core` as a `*Node` (built into the fused config in the fused closure, added to scores in the decomposed fallback — same pattern as seqlens). NO dropout fused-gate change.
 
 Within each per-repo plan, every task is tagged **[S1]** or **[S2]**.
 
@@ -66,17 +66,12 @@ type ScaledDotProductAttentionConfig struct {
 
 	// [S2] Bias is an optional additive attention-score bias broadcast to
 	// [B,H,S,Skv] (ALiBi / relative-position). NOT the Q/K/V projection bias.
-	// Selects the fmhaScaleBias* variants in the xla backend. nil = unused.
+	// Selects the fmhaScaleBias* variant in the xla backend. nil = unused.
 	Bias Value
-
-	// [S2] DropoutRate in [0,1); 0 disables. Nonzero selects the fmha*Dropout
-	// variants. Seed/Offset feed the backend RNG (Value: int64 scalars).
-	DropoutRate                float64
-	DropoutSeed, DropoutOffset Value
 }
 ```
 
-Stage 1 adds the `QuerySeqLen`/`KeyValueSeqLen` fields only; Stage 2 adds `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset`.
+Stage 1 adds the `QuerySeqLen`/`KeyValueSeqLen` fields only; Stage 2 adds `Bias`. (Dropout fields are cut — see Staging.)
 
 The forward/VJP **method signatures on `FusedOps` do not change** — all new params ride inside `*ScaledDotProductAttentionConfig`. FP8 is selected by the dtype of `query/key/value` (float8_e4m3fn / float8_e5m2), not a config field; fp8 is paused (see Contract C).
 
@@ -85,8 +80,8 @@ The forward/VJP **method signatures on `FusedOps` do not change** — all new pa
 CPU `go` backend reference (`internal/gobackend/fusedops/sdpa.go`) support matrix (tested directly, capability stays off):
 - QuerySeqLen/KeyValueSeqLen [S1]: implement (build padding mask from lengths).
 - Bias [S2]: implement (additive before softmax).
-- DropoutRate [S2]: implement deterministically from Seed/Offset (so CPU-vs-CPU tests are stable).
 - FP8 input dtype: return `ErrNotImplemented` (paused; never wired on CPU).
+- Dropout: cut (not a config field; no reference). `NotImplemented` if ever requested.
 
 ## Contract B — `go-xla` CustomCallV2 (plan 02 produces, internal to go-xla)
 
@@ -116,12 +111,12 @@ The existing MLIR `dense<[...]>` string rendering moves *inside* CustomCallV2 (b
 
 | Condition (first match wins) | Forward target | Backward target |
 |---|---|---|
-| Bias set + DropoutRate>0 | `__cudnn$fmhaScaleBiasSoftmaxDropout` | `…Backward` |
-| Bias set | `__cudnn$fmhaScaleBiasSoftmax` | `…Backward` |
-| DropoutRate>0 | `__cudnn$fmhaSoftmaxDropout` | `…Backward` |
+| Bias set [S2] | `__cudnn$fmhaScaleBiasSoftmax` | `__cudnn$fmhaScaleBiasSoftmaxBackward` |
 | else | `__cudnn$fmhaSoftmax` | `__cudnn$fmhaSoftmaxBackward` |
 
 Dtype gate: all wired variants accept `float16`/`bfloat16` only. Anything else → `ErrNotImplemented`.
+
+**Dropout / bias+dropout cut** (decided 2026-06-30): the `__cudnn$fmha*Dropout` targets are not wired. A nonzero dropout request (there is no dropout config field) never reaches here. Bias combines with causal and (where the kernel allows) seqlens via `mask_type`; a bias+seqlen combination the kernel can't fuse falls through to `ErrNotImplemented` → decomposed.
 
 **FP8 is paused, not wired** (decided 2026-06-29). The only fp8-capable hardware is Hopper/Ada (sm_8.9+); the local CUDA card is an RTX 3070 Ti (sm_8.6, Ampere) which has no fp8 tensor cores, so the F8 fmha path cannot execute on local hardware. Rather than ship an untested kernel, fp8 input dtype (`float8_e4m3fn`/`float8_e5m2`) falls through the dtype gate to `ErrNotImplemented` → decomposed fallback. The dispatch table above is the extension point: adding the `__cudnn$fmhaSoftmaxF8` / `…BackwardF8` row later (on a Hopper box, or by janpfeifer) is a pure addition, not a refactor. PR note hands fp8 to Jan explicitly.
 
@@ -148,11 +143,13 @@ func (b *MultiHeadAttentionBuilder) WithSeqLens(querySeqLen, keyValueSeqLen *Nod
 func (b *MultiHeadAttentionBuilder) WithAttentionBias(bias *Node) *MultiHeadAttentionBuilder
 ```
 
-`attention.Core` gains TWO trailing params, appended after `scoreSoftCap` (keeps the single production call site + test calls' positional args stable): `useFusion bool` (Stage 1, Task 2) and `fusedConfig *compute.ScaledDotProductAttentionConfig` (Stage 1, Task 4 — carries seqlens, later bias/dropout, into Core's fused branch). The existing `Core` fused branch additionally gates on `useFusion`. `GOMLX_FUSION` env stays as a global override in `InternalFusedOpCaller`; `WithFusion(false)` is the per-call override. The `*Node`→`compute.Value` boundary for the config is resolved by `core/graph.NewSeqLenAttentionConfig(querySeqLen, keyValueSeqLen *Node)` (in-package `outputOps[0]` access).
+`attention.Core` gains trailing params appended after `scoreSoftCap` (keeps the single production call site + test calls' positional args stable): `useFusion bool` (Stage 1, Task 2) and the seqlens as graph nodes `querySeqLen, keyValueSeqLen *Node` (Stage 1, Task 4). The existing `Core` fused branch additionally gates on `useFusion`.
+
+**Critical: Core takes the seqlens as `*Node`, not a pre-built `compute.Value` config.** Both the fused and decomposed paths need the seqlens in *different* forms, and a single materialized mask cannot serve both (a materialized mask passed to the fused path trips go-xla's `flashSupported` `mask != nil` rejection → no fusion). So Core builds each representation internally: the FUSED closure calls `core/graph.NewSeqLenAttentionConfig(querySeqLen, keyValueSeqLen)` (`*Node`→`compute.Value` via in-package `outputOps[0]`) and passes the config with `attentionMask=nil` (so it fuses, PADDING/PADDING_CAUSAL); the DECOMPOSED fallback builds a boolean padding mask from the same `*Node`s (Iota/LessThan, AND-combined with causal) so it masks correctly. `GOMLX_FUSION` env stays as a global override in `InternalFusedOpCaller`; `WithFusion(false)` is the per-call override. (S2 bias follows the same pattern — passed to Core as a `*Node`, built into the config inside the fused closure and added to the decomposed scores, not materialized up in `doneInternal`.)
 
 **No `SimpleAttention` helper** (decided 2026-06-29, on upstream merits — NOT a downstream consideration). Jan only hedged it ("if the use case is useful, we could..."). Any concrete version either (a) delegates to the builder/`Core` and therefore needs a `*model.Scope`, or (b) reimplements the fused-or-decomposed logic standalone — which is a *parallel path*, the exact duplication that deleting `flash.go` removes. The real primitives already cover the need: the `MultiHeadAttention` builder for the full path, and the scope-free `graph.BackendFusedScaledDotProductAttention` + `graph.InternalFusedOpCaller` for the bare fused-or-decomposed op. Don't add a third surface; if Jan wants the convenience helper he can shape it (builder-preconfiguring) on his own terms. The PR notes this as a deliberate omission.
 
-**[S2] dropout fused-gate.** Core's fused branch is currently gated `!dropoutActive` (active dropout forces the decomposed path). The dropout variant relaxes this: when the backend supports fused dropout, Core may fuse *with* dropout, threading the rate + seed/offset into the config. This gate change is Stage 2, not Stage 1.
+**[S2] bias threading.** `WithAttentionBias(bias *Node)` passes the bias to `Core` as a trailing `*Node` param (same pattern as seqlens): the FUSED closure puts it in the config (`Bias` field → cuDNN `fmhaScaleBiasSoftmax`); the DECOMPOSED fallback adds it to the scores before softmax. `Core`'s `!dropoutActive` gate is UNCHANGED — dropout fusion is cut (no dropout config field). Bias is independent of `WithFusion`/seqlens (it may combine with causal; a bias+seqlen combo the kernel can't fuse falls back to decomposed, which handles both).
 
 Capability check for tests (replaces `isCUDABackend`): a backend "supports fusion" iff a probe `BackendFusedScaledDotProductAttention` on a tiny causal bf16 input does not return `ErrNotImplemented`. (On CPU this is always false — capability stays off — so the CPU run takes the decomposed path; that is correct and intended.) Add `testutil.GetOfficialBackend(name string) compute.Backend` (returns the named official backend if present in the system, else skips) for the one `xla:cuda` specific test.
 
@@ -180,8 +177,8 @@ Factor lmkit's current decomposed else-branch (attention.go:48-66) into `decompo
 
 ## Verification gates (per plan)
 
-- **01 compute:** `go test ./...` green on Mac. New seqlen/bias/dropout reference code is covered by **direct unit tests on the `fusedops` functions** (capability stays `false`; the backendtest SDPA group stays skipped, as it is today). fp8 → `ErrNotImplemented`.
-- **02 go-xla:** `go test ./...` green on Mac for non-CUDA (CustomCallV2 rendering, fallback). **[cuda]** `go test ./compute/xla ./pjrt -run FMHA|Flash` green under `xla:cuda` for each wired variant (S1: standard + seqlen; S2: + bias/dropout).
+- **01 compute:** `go test ./...` green on Mac. New seqlen/bias reference code is covered by **direct unit tests on the `fusedops` functions** (capability stays `false`; the backendtest SDPA group stays skipped, as it is today). fp8 → `ErrNotImplemented`.
+- **02 go-xla:** `go test ./...` green on Mac for non-CUDA (CustomCallV2 rendering, fallback). **[cuda]** `go test ./compute/xla ./pjrt -run FMHA|Flash` green under `xla:cuda` for each wired variant (S1: standard + seqlen; S2: + bias).
 - **03 gomlx:** `go test ./ml/layers/attention/...` green on Mac (decomposed + fallback + `WithFusion(false)`). **[cuda]** the `xla:cuda` fusion-parity test green.
 - **lmkit-go (S1):** `go build ./...` green after the gomlx deletion; existing attention parity test green; **[cuda]** bf16 path still fuses.
 - **04 go-huggingface:** `go test ./...` green on Mac; one model integration test asserting seqlen path produces output within tolerance of the mask-matrix path.
