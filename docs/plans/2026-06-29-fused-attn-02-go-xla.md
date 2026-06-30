@@ -1206,10 +1206,12 @@ Expected: SKIP with "fmha is cuDNN-only" (Mac has no cuda plugin). The key resul
 - [ ] **Step 4: Run on the CUDA host to verify the execution path passes [cuda]**
 
 ```bash
-env GOMLX_BACKEND=xla:cuda go test ./pjrt/ -run TestFMHAForwardExecute -plugin cuda -v
+# NOTE: the pjrt fmha tests gate on a -plugin flag (FlagPluginName), NOT GOMLX_BACKEND.
+# The flag must come after -args or go test rejects it; the env-var form silently SKIPs.
+go test ./pjrt/ -run TestFMHAForwardExecute -v -args -plugin cuda
 ```
 
-Expected: PASS (output all ~1.0, per the test's invariant).
+Expected: PASS (output all ~1.0, per the test's invariant). VALIDATED on RTX 3070 Ti (sm_8.6, cuDNN 9.23).
 
 - [ ] **Step 5: Commit**
 
@@ -1239,10 +1241,12 @@ Expected: build exit 0 against the **Stage-1 compute fork** (config has `QuerySe
 - [ ] **the CUDA host (`xla:cuda`) — S1 matrix green [cuda][S1]:**
 
 ```bash
-env GOMLX_BACKEND=xla:cuda go test ./compute/xla ./pjrt -run 'FMHAForwardExecute|FMHA_SeqLen' -plugin cuda -v
+# compute/xla selects cuda via GOMLX_BACKEND; pjrt selects it via -plugin (after -args). Run separately:
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla -run 'FMHA_SeqLen' -v
+go test ./pjrt -run 'TestFMHA(Forward|Backward)Execute' -v -args -plugin cuda
 ```
 
-Expected: PASS for standard causal (`TestFMHAForwardExecute`) and seqlen padding-causal (`TestFMHA_SeqLenPaddingCausal_cuda`). No bias/dropout variants in the S1 matrix.
+Expected: PASS for standard causal (`TestFMHAForwardExecute`/`BackwardExecute`) and seqlen padding-causal (`TestFMHA_SeqLenPaddingCausal_cuda`). No bias/dropout variants in the S1 matrix. VALIDATED on RTX 3070 Ti.
 
 ### Stage 2 gate (Tasks 2b, 3b)
 
@@ -1259,7 +1263,9 @@ Expected: build exit 0 against the **Stage-2 compute fork** (config now carries 
 - [ ] **the CUDA host (`xla:cuda`) — full variant matrix green [cuda][S2]:**
 
 ```bash
-env GOMLX_BACKEND=xla:cuda go test ./compute/xla ./pjrt -run 'FMHA|Flash' -plugin cuda -v
+# compute/xla via GOMLX_BACKEND; pjrt via -plugin (after -args). Run separately:
+env GOMLX_BACKEND=xla:cuda go test ./compute/xla -run 'FMHA|Flash' -v
+go test ./pjrt -run 'FMHA' -v -args -plugin cuda
 ```
 
 Expected: PASS for each wired variant (standard causal, bias, dropout, bias+dropout, seqlen padding-causal). Variants unsupported by the installed cuDNN/card `t.Skip` rather than fail — note which ran green. (fp8 is not in this matrix — paused.)
