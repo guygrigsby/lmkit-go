@@ -36,6 +36,24 @@ The work ships in two stages. **Do Stage 1 in full — review — then Stage 2.*
 
 Within each per-repo plan, every task is tagged **[S1]** or **[S2]**.
 
+## Amendment A1 — FusedSDPA as a well-behaved GoMLX op (2026-07-01, from Jan's second review)
+
+Jan's 2026-07-01 review asks that the fused op stop being a cuDNN-shaped special case. Triaged with Guy; this amends Stage 1 (do it as part of S1, before S2). Three coupled changes, landed together:
+
+1. **`softmaxStats Value` → `statesForVJP []Value`** (compute + go-xla + gomlx). `softmaxStats` is a cuDNN-ism; a future CPU SIMD fused kernel keeps a different state set, and some cuDNN FMHA variants also need a `workspace` byte tensor. `[]Value` is the honest cross-backend abstraction: the forward returns `(output, statesForVJP, err)`; the VJP takes `statesForVJP` back. **This SUPERSEDES the old "FusedOps method signatures do not change" invariant** (contract line 76, plan 01 lines 7/18) — the forward and VJP signatures DO change, from a single stats `Value` to `[]Value`. `nil`/empty slice = "no fused backward, use the decomposed VJP" (same meaning `softmaxStats == nil` had). The `workspace` tensor is added as another slice element only when a wired variant needs it, not speculatively.
+
+2. **Register the VJP in `VJPRegistration`** (gomlx `core/graph/rev_autodiff.go`), like every other op — NOT via `customVJP` attached to the parent node (current `fused_ops.go:187-188`). A small wrapper around `backendFusedScaledDotProductAttentionVJP` registers centrally. Removes the one-off `customVJP`-on-parent mechanism.
+
+3. **`BackendFusedScaledDotProductAttention` returns the state** (gomlx `fused_ops.go:179`). A `Backend<Op>` escape hatch must mirror the backend op exactly and not hide outputs, so it returns `(output *Node, statesForVJP []*Node)`. With (2) doing the VJP centrally, the hidden wiring is gone: the op returns state, the registry supplies the gradient.
+
+These three collapse into one change: forward returns `[]Value`/`[]*Node` state, VJP registered centrally, `customVJP`-on-parent deleted.
+
+**Also in this round (not part of the A1 op-structure change):**
+- **`NewSeqLenAttentionConfig` (gomlx `fused_ops.go:159`): inline + unexport.** Jan's suggested literal assignment does not compile (`cfg.QuerySeqLen` is a `compute.Value`; the arg is a `*Node`; the helper exists to reach the unexported `.outputOps[0]`). Used once → inline the conversion at the call site, drop the exported name. The thread reply must state the type gap.
+- **`TestSeqLenFusedParity_cuda` (gomlx `fusion_test.go:535`): loop over `testutil.TestOfficialBackends`, drop the `_cuda`-specific name** (non-fusing backends pass trivially; a future Go SIMD fused kernel gets covered for free). Class-1 nit, but folded into this branch since (2) rewrites that test file anyway.
+- **Config consolidation → FOLLOW-UP PR, not S1** (decided with Guy 2026-07-01). compute#13 `fused_ops.go:333`: drop `numHeads`/`numKVHeads` (infer from shape + `axesLayout`), move `mask`/`causal`/`scale`/`bias` into `ScaledDotProductAttentionConfig`, `scale == 0` = default. Independent of A1; sequenced after Stage 2.
+- **`CoreConfig` struct (gomlx `attention.go:192`): Jan owns it** (he marked it his TODO/optional). Relates to config consolidation; not our work.
+
 ## Global Constraints (apply to every task in every per-repo plan)
 
 - **Go 1.26**, module paths: `github.com/gomlx/compute`, `github.com/gomlx/go-xla`, `github.com/gomlx/gomlx`, `github.com/gomlx/go-huggingface`.
@@ -73,7 +91,7 @@ type ScaledDotProductAttentionConfig struct {
 
 Stage 1 adds the `QuerySeqLen`/`KeyValueSeqLen` fields only; Stage 2 adds `Bias`. (Dropout fields are cut — see Staging.)
 
-The forward/VJP **method signatures on `FusedOps` do not change** — all new params ride inside `*ScaledDotProductAttentionConfig`. FP8 is selected by the dtype of `query/key/value` (float8_e4m3fn / float8_e5m2), not a config field; fp8 is paused (see Contract C).
+All new *config* params ride inside `*ScaledDotProductAttentionConfig`. **SUPERSEDED by Amendment A1:** the forward/VJP method signatures on `FusedOps` DO change — the stats output/input becomes `statesForVJP []Value` (was a single `softmaxStats Value`). FP8 is selected by the dtype of `query/key/value` (float8_e4m3fn / float8_e5m2), not a config field; fp8 is paused (see Contract C).
 
 **The CPU `go`-backend SDPA capability stays `false`.** It is disabled on purpose — `capabilities.go:147` documents that the fused CPU path is ~3x slower than the SIMD matmul + decomposed path; the maintainer turned it off pending a SIMD fused kernel. Do **not** flip it to make tests run. The reference impl in `internal/gobackend/fusedops/sdpa.go` is extended for correctness and exercised by **direct unit tests on the `fusedops` functions**, not through the capability-gated backend path. On CPU, `BackendFusedScaledDotProductAttention` therefore still returns `ErrNotImplemented` → decomposed fallback. Re-enable only alongside a SIMD fused kernel, or if Jan asks.
 
