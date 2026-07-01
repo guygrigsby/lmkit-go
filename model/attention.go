@@ -46,8 +46,9 @@ func Attention(cfg Config, x, wQ, wK, wV, wO *g.Node, positions []int) *g.Node {
 		// q,k,v are [B,T,nH,hd] (BSHD), kv already repeated to nH above. Causal.
 		out = g.InternalFusedOpCaller(
 			func() *g.Node {
-				return g.BackendFusedScaledDotProductAttention(
+				out, _ := g.BackendFusedScaledDotProductAttention(
 					q, k, v, nil, nH, nH, compute.AxesLayoutBSHD, scale, true, nil)
+				return out
 			},
 			func() *g.Node { return decomposedAttention(q, k, v, scale) },
 		)
