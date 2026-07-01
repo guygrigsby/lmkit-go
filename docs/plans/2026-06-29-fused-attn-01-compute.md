@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend the `compute` fused-attention interface (`ScaledDotProductAttentionConfig`) with sequence-length padding masking (Stage 1), then additive bias and deterministic dropout (Stage 2), and implement them in the CPU `go` backend reference (`internal/gobackend/fusedops/sdpa.go`) so downstream repos (go-xla#37, gomlx#427) can consume the new surface.
+**Goal:** Extend the `compute` fused-attention interface (`ScaledDotProductAttentionConfig`) with sequence-length padding masking (Stage 1), then additive bias (Stage 2), and implement them in the CPU `go` backend reference (`internal/gobackend/fusedops/sdpa.go`) so downstream repos (go-xla#37, gomlx#427) can consume the new surface.
 
 **Architecture:** All new *config* parameters ride inside `*ScaledDotProductAttentionConfig`. **Amendment A1 (see contract doc) SUPERSEDES the old "signatures do not change" rule:** the forward/VJP stats output/input becomes `statesForVJP []Value` (was single `softmaxStats Value`). The CPU `go` backend gains real reference implementations of the seqlen padding mask and additive bias; FP8 input dtype returns wrapped `ErrNotImplemented`. (Dropout cut 2026-06-30.)
 
@@ -17,7 +17,7 @@ See `docs/plans/2026-06-29-fused-attn-00-contract.md` for the full cross-repo co
 - Go 1.26; module `github.com/gomlx/compute`; branch `flash-customcall`; repo `/Users/guygrigsby/projects/forks/compute`.
 - This plan implements **Contract A** (the `compute` interface). New *config* params go inside `*ScaledDotProductAttentionConfig`. **Amendment A1 overrides the old "MUST NOT change" rule:** the forward returns `(output, statesForVJP []Value, err)` and the VJP takes `statesForVJP []Value` (was single `softmaxStats Value`). Update the `sdpa.go` reference signatures accordingly; the CPU reference returns an empty/nil `statesForVJP` (no fused backward) → decomposed VJP, exactly as `nil softmaxStats` meant.
 - **The CPU `go`-backend SDPA capability stays `false`.** Do not re-enable the `if false` registration in `sdpa.go`, do not flip `capabilities.go:147`. The reference is extended for correctness and tested directly. On CPU, `BackendFusedScaledDotProductAttention` still returns `ErrNotImplemented` → decomposed fallback. This is intentional (the SIMD matmul + decomposed path is ~3x faster); re-enable only alongside a SIMD fused kernel or if Jan asks.
-- **Stage order:** do all **[S1]** tasks (seqlen + the struct/equality plumbing they require + FP8 gate), then all **[S2]** tasks (bias, dropout). Each stage is independently green and reviewable.
+- **Stage order:** do all **[S1]** tasks (seqlen + the struct/equality plumbing they require + FP8 gate), then all **[S2]** tasks (bias). Each stage is independently green and reviewable.
 - **No push, no PR.** Every task ends at `git commit` on `flash-customcall`. Guy reviews diffs before anything reaches a remote.
 - **Fallback is the contract.** Any unsupported config (here: FP8 input dtype) returns a `compute.ErrNotImplemented` wrapped with a stack via `errors.Wrapf`. Never panic on an unsupported-but-valid request.
 - Commit messages: terse, verb-first, no em/en dashes, prefix `fused_ops:`, no Claude attribution.
@@ -48,9 +48,9 @@ This harness file is created in **[S1] Task 1, Step 1** (the first test that nee
 
 ## File map
 
-- `fused_ops.go` — extend `ScaledDotProductAttentionConfig`: `QuerySeqLen`/`KeyValueSeqLen` ([S1] Task 1), `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset` ([S2] Task 4).
-- `internal/gobackend/fusedops/sdpa.go` — rewrite `equalOptions` + node flags ([S1] Task 1); seqlen padding mask ([S1] Task 2); FP8 gate ([S1] Task 3); additive bias ([S2] Task 4); deterministic dropout ([S2] Task 5). **`init()` and `capabilities.go` are NOT touched.**
-- `internal/gobackend/fusedops/sdpa_direct_test.go` — NEW direct-unit-test file (package `fusedops`): registers the executor for the test binary, holds `WithSeqLens`, `WithSeqLensCausal`, `FP8NotImplemented` ([S1]); `WithBias`, `WithDropoutDeterministic` ([S2]).
+- `fused_ops.go` — extend `ScaledDotProductAttentionConfig`: `QuerySeqLen`/`KeyValueSeqLen` ([S1] Task 1), `Bias` ([S2] Task 4).
+- `internal/gobackend/fusedops/sdpa.go` — rewrite `equalOptions` + node flags ([S1] Task 1); seqlen padding mask ([S1] Task 2); FP8 gate ([S1] Task 3); additive bias ([S2] Task 4). **`init()` and `capabilities.go` are NOT touched.**
+- `internal/gobackend/fusedops/sdpa_direct_test.go` — NEW direct-unit-test file (package `fusedops`): registers the executor for the test binary, holds `WithSeqLens`, `WithSeqLensCausal`, `FP8NotImplemented` ([S1]); `WithBias` ([S2]).
 - `support/backendtest/fusedops.go` — **untouched** (its SDPA group stays skipped because the capability is off).
 
 ---
@@ -143,7 +143,7 @@ Expected: COMPILE FAILURE — `unknown field 'QuerySeqLen' in struct literal of 
 
 - [ ] **Step 3: Add the seqlen fields to the struct**
 
-In `fused_ops.go`, replace the `ScaledDotProductAttentionConfig` struct (lines 206-218) with the version below. Only the S1 seqlen fields are added now; the S2 bias/dropout fields are added in Task 4 to keep each stage's diff self-contained:
+In `fused_ops.go`, replace the `ScaledDotProductAttentionConfig` struct (lines 206-218) with the version below. Only the S1 seqlen fields are added now; the S2 Bias field is added in Task 4 to keep each stage's diff self-contained:
 
 ```go
 // ScaledDotProductAttentionConfig holds optional optimization hints and fused-attention
@@ -189,7 +189,7 @@ func (d *nodeScaledDotProductAttention) equalOptions(o *nodeScaledDotProductAtte
 }
 ```
 
-Note: the `Value` (== `any`) comparisons compare the interface values the caller passed. For the go backend these are `*gobackend.Value` pointers (comparable), so `==` is pointer identity and never panics. If a backend ever stores a non-comparable concrete value, dedup falls back to "not equal", which is safe. (Task 4 extends this with the S2 bias/dropout fields.)
+Note: the `Value` (== `any`) comparisons compare the interface values the caller passed. For the go backend these are `*gobackend.Value` pointers (comparable), so `==` is pointer identity and never panics. If a backend ever stores a non-comparable concrete value, dedup falls back to "not equal", which is safe. (Task 4 extends this with the S2 Bias field.)
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -552,14 +552,14 @@ Stop here for review before Stage 2.
 
 ---
 
-## STAGE 2 — additive bias + deterministic dropout
+## STAGE 2 — additive bias
 
-### [S2] Task 4: Add bias/dropout config fields and implement additive bias
+### [S2] Task 4: Add bias config field and implement additive bias
 
-**Why:** Stage 2 adds `Bias`/`DropoutRate`/`DropoutSeed`/`DropoutOffset` (Contract A, S2) and implements the additive pre-softmax bias in the CPU reference. (Dropout impl is Task 5; this task adds its struct fields alongside bias so the struct extension is one diff.)
+**Why:** Stage 2 adds `Bias` (Contract A, S2) and implements the additive pre-softmax bias in the CPU reference.
 
 **Files:**
-- Modify: `fused_ops.go` (extend struct with the four S2 fields)
+- Modify: `fused_ops.go` (extend struct with the S2 Bias field)
 - Modify: `internal/gobackend/fusedops/sdpa.go` (`equalOptions`, `buildSDPANode`, `execFusedScaledDotProductAttention`, `sdpaMultiHeadGeneric`, `sdpaGeneric` — bias path)
 - Test: `internal/gobackend/fusedops/sdpa_direct_test.go` (new test `TestSDPADirect_WithBias`)
 
@@ -604,9 +604,9 @@ func TestSDPADirect_WithBias(t *testing.T) {
 Run: `cd /Users/guygrigsby/projects/forks/compute && go test ./internal/gobackend/fusedops/ -run 'TestSDPADirect_WithBias' -v`
 Expected: COMPILE FAILURE first — `unknown field 'Bias'`. After Step 3 adds the field but before Step 5 wires it, FAIL — bias ignored, output is the plain mean `15` not `~10.007`.
 
-- [ ] **Step 3: Add the S2 fields to the struct**
+- [ ] **Step 3: Add the S2 Bias field to the struct**
 
-In `fused_ops.go`, append the four S2 fields to `ScaledDotProductAttentionConfig` (after `QuerySeqLen, KeyValueSeqLen Value`):
+In `fused_ops.go`, append the S2 Bias field to `ScaledDotProductAttentionConfig` (after `QuerySeqLen, KeyValueSeqLen Value`):
 
 ```go
 	// Bias is an optional additive attention-score bias broadcast to [B,H,S,Skv],
@@ -614,33 +614,23 @@ In `fused_ops.go`, append the four S2 fields to `ScaledDotProductAttentionConfig
 	// Q/K/V projection bias. Selects the fmhaScaleBias* variants in the xla backend.
 	// nil = unused.
 	Bias Value
-
-	// DropoutRate in [0,1); 0 disables. Nonzero selects the fmha*Dropout variants.
-	// DropoutSeed and DropoutOffset feed the backend RNG (Value: int64 scalars) so the
-	// dropout pattern is deterministic for a given (seed, offset). nil seed/offset with a
-	// nonzero rate is treated as seed=0, offset=0.
-	DropoutRate                float64
-	DropoutSeed, DropoutOffset Value
 ```
 
-- [ ] **Step 4: Extend equalOptions with the S2 fields**
+- [ ] **Step 4: Extend equalOptions with the S2 Bias field**
 
-In `internal/gobackend/fusedops/sdpa.go`, extend `equalOptions` to compare the new fields:
+In `internal/gobackend/fusedops/sdpa.go`, extend `equalOptions` to compare the new field:
 
 ```go
 	a, b := d.options, o.options
 	return a.QuantizedMatmuls == b.QuantizedMatmuls &&
 		a.QuerySeqLen == b.QuerySeqLen &&
 		a.KeyValueSeqLen == b.KeyValueSeqLen &&
-		a.Bias == b.Bias &&
-		a.DropoutRate == b.DropoutRate &&
-		a.DropoutSeed == b.DropoutSeed &&
-		a.DropoutOffset == b.DropoutOffset
+		a.Bias == b.Bias
 ```
 
 - [ ] **Step 5: Thread Bias through buildSDPANode and exec**
 
-In `buildSDPANode`, append the bias operand right after the mask append (before the seqlen block from Task 2, so operand order is mask, bias, seqlens, dropout):
+In `buildSDPANode`, append the bias operand right after the mask append (before the seqlen block from Task 2, so operand order is mask, bias, seqlens):
 
 ```go
 	hasBias := options != nil && options.Bias != nil
@@ -766,203 +756,20 @@ Expected: PASS for all `TestSDPADirect_*` tests.
 ```bash
 cd /Users/guygrigsby/projects/forks/compute
 git add fused_ops.go internal/gobackend/fusedops/sdpa.go internal/gobackend/fusedops/sdpa_direct_test.go
-git commit -m "fused_ops: add bias/dropout config fields and implement additive bias"
+git commit -m "fused_ops: add bias config field and implement additive bias"
 ```
 
 ---
 
 ### [S2] Task 5: CPU reference — deterministic dropout
 
-**Why:** Contract A (S2): implement `DropoutRate` deterministically from `DropoutSeed`/`DropoutOffset` so CPU-vs-CPU tests are stable (same seed -> same output; different seed -> different).
-
-**Files:**
-- Modify: `internal/gobackend/fusedops/sdpa.go` (`buildSDPANode`, `execFusedScaledDotProductAttention`, `sdpaMultiHeadGeneric`, `sdpaGeneric` — dropout path; add `dropoutUniform` helper)
-- Test: `internal/gobackend/fusedops/sdpa_direct_test.go` (new test `TestSDPADirect_WithDropoutDeterministic`)
-
-**Interfaces:**
-- Consumes: Task 4 (operand-threading pattern; `options.DropoutRate float64`, `options.DropoutSeed`, `options.DropoutOffset compute.Value`).
-- Produces: when `options.DropoutRate > 0`, each post-softmax weight is independently dropped with probability `DropoutRate`, surviving weights scaled by `1/(1-DropoutRate)` (inverted dropout), via a deterministic per-element PRNG keyed on `(seed, offset, b, h, qIdx, kvIdx)`. Seed/offset are optional int64 scalar `Value`s; nil means 0. The pattern is identical across runs for a fixed `(seed, offset)`.
-
-- [ ] **Step 1: Write the failing test**
-
-Append this test to `internal/gobackend/fusedops/sdpa_direct_test.go`:
-
-```go
-func TestSDPADirect_WithDropoutDeterministic(t *testing.T) {
-	b := newGoBackend(t)
-	// Wide attention (8 keys, rate 0.5) so dropout changes the output with high
-	// probability. Same seed -> identical output; different seed -> different.
-	q := [][][][]float32{{{{1}}}} // [1,1,1,1]
-	k := [][][][]float32{{{{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}}}} // [1,1,8,1]
-	v := [][][][]float32{{{{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}}}} // [1,1,8,1]
-	run := func(seed int64) any {
-		out, err := testutil.Exec1(b, []any{q, k, v, seed}, func(f compute.Function, params []compute.Value) (compute.Value, error) {
-			cfg := &compute.ScaledDotProductAttentionConfig{DropoutRate: 0.5, DropoutSeed: params[3]}
-			o, _, err := f.FusedScaledDotProductAttention(params[0], params[1], params[2], nil, 1, 1, compute.AxesLayoutBHSD, 1.0, false, cfg)
-			return o, err
-		})
-		if err != nil {
-			t.Fatalf("SDPA with dropout failed: %+v", err)
-		}
-		return out
-	}
-	a1 := run(7)
-	a2 := run(7)
-	c1 := run(42)
-	if ok, _ := testutil.IsInDelta(a1, a2, 1e-9); !ok {
-		t.Errorf("same seed must produce identical dropout output: %v vs %v", a1, a2)
-	}
-	if ok, _ := testutil.IsInDelta(a1, c1, 1e-9); ok {
-		t.Errorf("different seeds must produce different dropout output, both = %v", a1)
-	}
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd /Users/guygrigsby/projects/forks/compute && go test ./internal/gobackend/fusedops/ -run 'TestSDPADirect_WithDropoutDeterministic' -v`
-Expected: FAIL — dropout ignored, so seed 7 and seed 42 give the identical (undropped) output, tripping "different seeds must produce different".
-
-- [ ] **Step 3: Thread dropout params through buildSDPANode**
-
-In `buildSDPANode`, after the seqlen-append block, append the optional dropout seed/offset operands (operand order: mask, bias, seqlens, dropout seed, dropout offset). Scalar seed/offset are passed as operands so the graph can carry runtime RNG state; nil defaults to 0 captured in node data:
-
-```go
-	hasDropout := options != nil && options.DropoutRate > 0
-	if hasDropout {
-		if options.DropoutSeed != nil {
-			values = append(values, options.DropoutSeed)
-		}
-		if options.DropoutOffset != nil {
-			values = append(values, options.DropoutOffset)
-		}
-	}
-```
-
-Extend `nodeScaledDotProductAttention` with the flags needed to locate these operands:
-
-```go
-	hasDropout     bool
-	hasDropoutSeed bool
-	hasDropoutOff  bool
-```
-
-Set them in the `data` literal:
-
-```go
-		hasDropout:     hasDropout,
-		hasDropoutSeed: hasDropout && options.DropoutSeed != nil,
-		hasDropoutOff:  hasDropout && options.DropoutOffset != nil,
-```
-
-Add all three to `EqualNodeData` (`&& d.hasDropout == o.hasDropout && d.hasDropoutSeed == o.hasDropoutSeed && d.hasDropoutOff == o.hasDropoutOff`).
-
-- [ ] **Step 4: Read seed/offset in exec and pass dropout params down**
-
-In `execFusedScaledDotProductAttention`, after the seqlen block, read the optional seed/offset scalars (default 0) and the rate:
-
-```go
-	var dropoutRate float64
-	var dropoutSeed, dropoutOffset int64
-	if data.hasDropout {
-		dropoutRate = data.options.DropoutRate
-		if data.hasDropoutSeed {
-			dropoutSeed = inputs[next].Flat.([]int64)[0]
-			next++
-		}
-		if data.hasDropoutOff {
-			dropoutOffset = inputs[next].Flat.([]int64)[0]
-			next++
-		}
-	}
-	_ = next
-```
-
-Pass `dropoutRate, dropoutSeed, dropoutOffset` into both `sdpaMultiHeadGeneric` dtype calls (alongside the seqlen + bias args from Tasks 2 and 4).
-
-- [ ] **Step 5: Add a deterministic per-element PRNG and apply inverted dropout**
-
-At the top of `internal/gobackend/fusedops/sdpa.go`, after the imports, add a pure splitmix64-based hash: given the key tuple it returns a uniform float64 in `[0,1)`:
-
-```go
-// dropoutUniform returns a deterministic uniform value in [0,1) for the given key.
-// splitmix64 finalizer over a mixed 64-bit key: stable across runs and platforms.
-func dropoutUniform(seed, offset int64, b, h, q, kv int) float64 {
-	x := uint64(seed)
-	mix := func(v uint64) {
-		x += v * 0x9E3779B97F4A7C15
-		x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
-		x = (x ^ (x >> 27)) * 0x94D049BB133111EB
-		x ^= x >> 31
-	}
-	mix(uint64(offset))
-	mix(uint64(b))
-	mix(uint64(h))
-	mix(uint64(q))
-	mix(uint64(kv))
-	// Top 53 bits -> [0,1).
-	return float64(x>>11) / float64(uint64(1)<<53)
-}
-```
-
-Extend `sdpaMultiHeadGeneric` to accept dropout params:
-
-```go
-func sdpaMultiHeadGeneric[T float32 | float64](query, key, value, mask, bias, output *gobackend.Buffer, data *nodeScaledDotProductAttention, maskBatchStride, maskHeadStride, biasBatchStride, biasHeadStride int, querySeqLen, keyValueSeqLen []int32, dropoutRate float64, dropoutSeed, dropoutOffset int64) {
-```
-
-Dropout is keyed per (batch, head, query, key). `sdpaGeneric` works per KV-head group; pass the absolute base head index plus dropout params so the PRNG can recover the absolute head. Extend `sdpaGeneric` (after `qLimit, kvLimit int`):
-
-```go
-	qLimit, kvLimit int,
-	dropoutRate float64, dropoutSeed, dropoutOffset int64,
-	batchIdx, baseHeadIdx int,
-) {
-```
-
-At the call site in `sdpaMultiHeadGeneric`, pass `dropoutRate, dropoutSeed, dropoutOffset, batchIdx, kvHeadIdx*groupSize`.
-
-Inside `sdpaGeneric`, after the softmax normalization writes the final per-key weights (after the block that sets `scores[scoreIdx] *= invSum`, before the output accumulation that starts at `outBase := gQOff + qIdx*qSeqStride`), apply inverted dropout when `dropoutRate > 0`:
-
-```go
-			if dropoutRate > 0 {
-				keep := 1.0 - dropoutRate
-				invKeep := T(1.0 / keep)
-				absHead := baseHeadIdx + gIdx
-				for kvIdx := range kvLenUnmasked {
-					scoreIdx := scoreIdxBase + kvIdx
-					if dropoutUniform(dropoutSeed, dropoutOffset, batchIdx, absHead, qIdx, kvIdx) < dropoutRate {
-						scores[scoreIdx] = 0
-					} else {
-						scores[scoreIdx] *= invKeep
-					}
-				}
-			}
-```
-
-- [ ] **Step 6: Run test to verify it passes**
-
-Run: `cd /Users/guygrigsby/projects/forks/compute && go test ./internal/gobackend/fusedops/ -run 'TestSDPADirect_WithDropoutDeterministic' -v`
-Expected: PASS (same seed identical, different seeds differ).
-
-- [ ] **Step 7: Run the whole fusedops suite to confirm no regression**
-
-Run: `cd /Users/guygrigsby/projects/forks/compute && go test ./internal/gobackend/fusedops/ -v`
-Expected: PASS for all `TestSDPADirect_*` tests (dropout off by default leaves prior tests unchanged).
-
-- [ ] **Step 8: Commit**
-
-```bash
-cd /Users/guygrigsby/projects/forks/compute
-git add internal/gobackend/fusedops/sdpa.go internal/gobackend/fusedops/sdpa_direct_test.go
-git commit -m "fused_ops: implement deterministic dropout in go backend"
-```
+CUT (2026-06-30): fused dropout removed; no caller needs it. Stays a NotImplemented seam. See contract Staging.
 
 ---
 
 ## Verification gate (01 compute)
 
-Per the contract's revised "01 compute" gate: `go test ./...` green on Mac; the new seqlen/bias/dropout reference code is covered by **direct unit tests on the `fusedops` functions** (`TestSDPADirect_*`); the **CPU SDPA capability stays `false`** and the **capability-gated `backendtest` SDPA group stays skipped** exactly as it is today; FP8 input → `ErrNotImplemented`.
+Per the contract's revised "01 compute" gate: `go test ./...` green on Mac; the new seqlen/bias reference code is covered by **direct unit tests on the `fusedops` functions** (`TestSDPADirect_*`); the **CPU SDPA capability stays `false`** and the **capability-gated `backendtest` SDPA group stays skipped** exactly as it is today; FP8 input → `ErrNotImplemented`.
 
 - [ ] **Full module build:**
 
@@ -977,7 +784,7 @@ Expected: all packages `ok` (or `[no test files]`), no `FAIL`.
 - [ ] **Direct fusedops unit tests all pass:**
 
 Run: `cd /Users/guygrigsby/projects/forks/compute && go test ./internal/gobackend/fusedops/ -v`
-Expected: PASS for `TestSDPADirect_ConfigFieldsCompile`, `TestSDPADirect_WithSeqLens`, `TestSDPADirect_WithSeqLensCausal`, `TestSDPADirect_FP8NotImplemented`, `TestSDPADirect_WithBias`, `TestSDPADirect_WithDropoutDeterministic`.
+Expected: PASS for `TestSDPADirect_ConfigFieldsCompile`, `TestSDPADirect_WithSeqLens`, `TestSDPADirect_WithSeqLensCausal`, `TestSDPADirect_FP8NotImplemented`, `TestSDPADirect_WithBias`.
 
 - [ ] **Capability-gated SDPA group still SKIPs (capability off, intended):**
 
@@ -997,18 +804,18 @@ When green, the downstream go-xla#37 plan (02) can consume the new `ScaledDotPro
 
 **Spec coverage vs contract.**
 - Contract A "CPU SDPA capability stays `false`": honored — no edit to `capabilities.go` or the `if false` `init()` guard; the verification gate asserts the gated group still SKIPs. The old Task 0 that re-enabled the op is REMOVED.
-- Contract A reference support matrix: QuerySeqLen/KeyValueSeqLen ([S1] Task 2), Bias ([S2] Task 4), DropoutRate deterministic from seed/offset ([S2] Task 5), FP8 → `ErrNotImplemented` ([S1] Task 3). All covered.
-- Staging: tasks ordered S1 (struct+equality plumbing Task 1, seqlen Task 2, FP8 gate Task 3) then S2 (bias Task 4, dropout Task 5), with an explicit Stage 1 gate between them. FP8 kept in S1 as decided (pure dtype gating). Every task is tagged [S1]/[S2].
+- Contract A reference support matrix: QuerySeqLen/KeyValueSeqLen ([S1] Task 2), Bias ([S2] Task 4), FP8 → `ErrNotImplemented` ([S1] Task 3). All covered.
+- Staging: tasks ordered S1 (struct+equality plumbing Task 1, seqlen Task 2, FP8 gate Task 3) then S2 (bias Task 4), with an explicit Stage 1 gate between them. FP8 kept in S1 as decided (pure dtype gating). Every task is tagged [S1]/[S2].
 - Tests are DIRECT unit tests on the `fusedops` package functions (`internal/gobackend/fusedops/sdpa_direct_test.go`, package `fusedops`, registers the executor in a test-local `init()` and calls `FusedScaledDotProductAttention(...)` / `buildSDPANode` through the graph), NOT through the capability-gated `support/backendtest/fusedops.go` (which stays untouched and skipped). Each test compares to an in-test decomposed reference.
 - Verification gate matches the contract's revised "01 compute": `go test ./...` green; direct unit tests cover the new paths; capability stays false; backendtest SDPA group stays skipped; FP8 → ErrNotImplemented.
 
 **Placeholder scan.** No `TODO`, no `...` stand-ins, no "implement X here" — every step gives full, pasteable Go. Exported/unexported names match the verified source: `FusedScaledDotProductAttention`, `buildSDPANode`, `execFusedScaledDotProductAttention`, `sdpaMultiHeadGeneric`, `sdpaGeneric`, `equalOptions`, `EqualNodeData`, `nodeScaledDotProductAttention`, `sdpaComputeMaskStrides`, `transposeBuffer` all verified against `sdpa.go`.
 
 **Type consistency.**
-- New config fields are `Value` (= `any`) for tensors (`QuerySeqLen`, `KeyValueSeqLen`, `Bias`, `DropoutSeed`, `DropoutOffset`) and `float64` for `DropoutRate`, matching Contract A verbatim.
+- New config fields are `Value` (= `any`) for tensors (`QuerySeqLen`, `KeyValueSeqLen`, `Bias`), matching Contract A verbatim.
 - `equalOptions` compares `Value` fields with `==` (pointer identity on `*gobackend.Value`, comparable; safe non-equal otherwise) — no `*d.options == *o.options` struct compare that would panic on interface fields. This is the real bug fix.
-- Operand order is fixed and consistent everywhere it is read: `query, key, value [, mask] [, bias] [, querySeqLen, keyValueSeqLen] [, dropoutSeed] [, dropoutOffset]`. `exec` walks them with a single `next` cursor gated by the node `has*` flags, matching the `buildSDPANode` append order.
-- Kernel signatures stay generic `[T float32 | float64]`; int32 seqlen slices and int64 dropout scalars are read in `exec` (not generic), passed as concrete types — no dtype mismatch.
+- Operand order is fixed and consistent everywhere it is read: `query, key, value [, mask] [, bias] [, querySeqLen, keyValueSeqLen]`. `exec` walks them with a single `next` cursor gated by the node `has*` flags, matching the `buildSDPANode` append order.
+- Kernel signatures stay generic `[T float32 | float64]`; int32 seqlen slices are read in `exec` (not generic), passed as concrete types — no dtype mismatch.
 - FP8 gate uses `dtypes.F8E4M3FN`/`dtypes.F8E5M2` and `errors.Wrapf(compute.ErrNotImplemented, ...)`; all three packages already imported in `sdpa.go`.
 
-**One risk flagged.** The seqlen/dropout scalars are fed as runtime operands (graph parameters), so the FP8 and seqlen tests rely on the test-local `init()` registering the executor. If a future refactor moves registration behind the capability flag, these direct tests would start exercising nothing — the gate's "capability-gated group still SKIPs" check plus the direct tests asserting real numeric output together catch that.
+**One risk flagged.** The seqlen scalars are fed as runtime operands (graph parameters), so the FP8 and seqlen tests rely on the test-local `init()` registering the executor. If a future refactor moves registration behind the capability flag, these direct tests would start exercising nothing — the gate's "capability-gated group still SKIPs" check plus the direct tests asserting real numeric output together catch that.

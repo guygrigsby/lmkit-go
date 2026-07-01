@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Delete the CUDA-shaped `FlashAttention` wrapper, expose fusion through the `MultiHeadAttention` builder (`WithFusion`, `WithSeqLens`), make the attention tests backend-general instead of `isCUDABackend`-gated, and (Stage 2) add `WithAttentionBias` and a fused-with-dropout path, per Contract D. No replacement convenience helper is added (Contract D, "No SimpleAttention helper"): the bare primitives `graph.BackendFusedScaledDotProductAttention` + `graph.InternalFusedOpCaller` and the `MultiHeadAttention` builder already cover the need.
+**Goal:** Delete the CUDA-shaped `FlashAttention` wrapper, expose fusion through the `MultiHeadAttention` builder (`WithFusion`, `WithSeqLens`), make the attention tests backend-general instead of `isCUDABackend`-gated, and (Stage 2) add `WithAttentionBias`, per Contract D. No replacement convenience helper is added (Contract D, "No SimpleAttention helper"): the bare primitives `graph.BackendFusedScaledDotProductAttention` + `graph.InternalFusedOpCaller` and the `MultiHeadAttention` builder already cover the need.
 
-**Architecture:** The fused capability already lives in `attention.Core`'s fused branch (`InternalFusedOpCaller(fused, decomposed)`), so the standalone `FlashAttention` function is redundant and CUDA-flavored — delete it with no replacement helper. Add a per-call `WithFusion` gate threaded `builder → doneInternal → Core` (`Core` carries it as a plain `useFusion bool` param), a `WithSeqLens` path that populates `compute.ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`, and rewrite the tests to probe each official backend for fusion support (`backendSupportsFusion`) rather than sniff the backend name. Stage 2 adds the score-bias variant (`WithAttentionBias` → `config.Bias`) and relaxes the fused branch's `!dropoutActive` gate so it can fuse with dropout.
+**Architecture:** The fused capability already lives in `attention.Core`'s fused branch (`InternalFusedOpCaller(fused, decomposed)`), so the standalone `FlashAttention` function is redundant and CUDA-flavored — delete it with no replacement helper. Add a per-call `WithFusion` gate threaded `builder → doneInternal → Core` (`Core` carries it as a plain `useFusion bool` param), a `WithSeqLens` path that populates `compute.ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`, and rewrite the tests to probe each official backend for fusion support (`backendSupportsFusion`) rather than sniff the backend name. Stage 2 adds the score-bias variant (`WithAttentionBias` → `config.Bias`).
 
 **Amendment A1 (2026-07-01, see contract doc) — gomlx-side changes, part of Stage 1:**
 - `BackendFusedScaledDotProductAttention` (`core/graph/fused_ops.go:179`) returns `(output *Node, statesForVJP []*Node)` instead of hiding `softmaxStats` — a `Backend<Op>` escape hatch mirrors the backend op and does not hide outputs.
@@ -14,21 +14,21 @@
 
 **Tech Stack:** Go 1.26, `github.com/gomlx/gomlx` (fork, branch `flash-attention`), depends on `github.com/gomlx/compute` (fork, branch `flash-customcall`) and `github.com/gomlx/go-xla` (fork, branch `flash-attention`) via local `replace`.
 
-**Contract:** This plan **produces Contract D** and **consumes Contracts A and C** of `docs/plans/2026-06-29-fused-attn-00-contract.md`. Read the contract first — especially the **Staging** section (Stage 1 = strict API refactor; Stage 2 = variants) and the revised **Contract D** (`WithFusion`, the "No SimpleAttention helper" note, the S2 `WithAttentionBias`, and the S2 dropout-gate relaxation). Global constraints (Go 1.26, no push/no PR, CUDA tests `[cuda]` only, fallback-on-`ErrNotImplemented`, voice-rule commits with `attention:` prefix and no Claude attribution) are defined there and apply to every task below; they are not restated per task.
+**Contract:** This plan **produces Contract D** and **consumes Contracts A and C** of `docs/plans/2026-06-29-fused-attn-00-contract.md`. Read the contract first — especially the **Staging** section (Stage 1 = strict API refactor; Stage 2 = variants) and the revised **Contract D** (`WithFusion`, the "No SimpleAttention helper" note, and the S2 `WithAttentionBias`). Global constraints (Go 1.26, no push/no PR, CUDA tests `[cuda]` only, fallback-on-`ErrNotImplemented`, voice-rule commits with `attention:` prefix and no Claude attribution) are defined there and apply to every task below; they are not restated per task.
 
 ## Staging
 
 Per the contract's Staging section, this plan ships in two stages, each independently green and reviewable. **Do Stage 1 in full — review — then Stage 2.**
 
 - **[S1] (strict API refactor, no variants):** Tasks 0–7 below. Delete `flash.go` (no replacement helper); relocate (do not lose) the test-only decomposed oracles `naiveCausalAttention`/`naiveGQAReference`/`repeatKVHeads`; `WithFusion` builder method + `useFusion bool` through `Core`; `WithSeqLens` threading into `compute.ScaledDotProductAttentionConfig.QuerySeqLen/KeyValueSeqLen`; `testutil.GetOfficialBackend`; generalize tests (`backendSupportsFusion` probe, loop `TestOfficialBackends`, `testutil.GetOfficialBackend`); bench fixes (`FinalizeAll`, `for range`, rename `TestFusionThroughput`, single `WithFusion`-toggled code path, flags not env). In S1 the only fused-config fields that exist are `QuerySeqLen/KeyValueSeqLen` (per compute Stage 1).
-- **[S2] (variants — depends on compute Stage 2 fields):** Tasks 8–9 below. Add `WithAttentionBias(bias *Node)` populating `config.Bias` (DISTINCT from the existing `UseProjectionBias`); relax `Core`'s `!dropoutActive` fused-branch gate so it fuses *with* dropout when the backend supports fused dropout, threading rate + seed/offset into the config. These depend on the compute Stage 2 fields (`Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`) existing on `ScaledDotProductAttentionConfig`; do **not** start S2 until plan 01 Stage 2 has landed those fields through the local `replace`.
+- **[S2] (variants — depends on compute Stage 2 fields):** Tasks 8–9 below. Add `WithAttentionBias(bias *Node)` populating `config.Bias` (DISTINCT from the existing `UseProjectionBias`). This depends on the compute Stage 2 field (`Bias`) existing on `ScaledDotProductAttentionConfig`; do **not** start S2 until plan 01 Stage 2 has landed that field through the local `replace`.
 
 S1 tasks (0–7) come first; S2 tasks (8–9) come last.
 
 ## Global Constraints
 
 - Repo `/Users/guygrigsby/projects/forks/gomlx`, branch `flash-attention`, module `github.com/gomlx/gomlx`, Go 1.26.
-- This plan depends on Contract A landing first: `compute.ScaledDotProductAttentionConfig` must already carry `QuerySeqLen, KeyValueSeqLen Value` (plan 01 Stage 1). Task 0 verifies the local `replace` points at the updated compute fork and the S1 fields exist; if they do not, stop — plan 01 Stage 1 is not done. The S2 fields (`Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`) are verified separately by Task 8 Step 0.
+- This plan depends on Contract A landing first: `compute.ScaledDotProductAttentionConfig` must already carry `QuerySeqLen, KeyValueSeqLen Value` (plan 01 Stage 1). Task 0 verifies the local `replace` points at the updated compute fork and the S1 fields exist; if they do not, stop — plan 01 Stage 1 is not done. The S2 field (`Bias`) is verified separately by Task 8 Step 0.
 - Commit prefix `attention:` (existing scheme in this package). Terse, verb-first, no em/en dashes, no Claude attribution.
 - CUDA execution is `[cuda]` only; the Mac CI has no cuDNN. Mark every step whose `Run:` needs `xla:cuda` with **[cuda]**. Everything else runs on the Mac `go` (CPU) backend.
 - Fallback is the contract: an unsupported-but-valid request returns wrapped `compute.ErrNotImplemented` and falls back to the decomposed path. Never panic on unsupported-but-valid.
@@ -38,7 +38,7 @@ S1 tasks (0–7) come first; S2 tasks (8–9) come last.
 ## File Structure
 
 - `ml/layers/attention/flash.go` — **DELETE** [S1]. The `FlashAttention` function is superseded by `Core`'s fused branch; no replacement helper is added (Contract D, "No SimpleAttention helper"). Its decomposed half, `naiveCausalAttention`, has no runtime caller after the deletion (Core has its own inline decomposed path), so it survives only as a test-only decomposed oracle and moves to a `_test.go`, alongside the already-test-only helpers (`naiveGQAReference`, `repeatKVHeads`).
-- `ml/layers/attention/attention.go` — `Core` gains a trailing `useFusion bool` param [S1] and a trailing `*compute.ScaledDotProductAttentionConfig` param [S1]; the fused branch additionally gates on `useFusion` and threads the config into `BackendFusedScaledDotProductAttention`. Stage 2 relaxes the `!dropoutActive` gate.
+- `ml/layers/attention/attention.go` — `Core` gains a trailing `useFusion bool` param [S1] and a trailing `*compute.ScaledDotProductAttentionConfig` param [S1]; the fused branch additionally gates on `useFusion` and threads the config into `BackendFusedScaledDotProductAttention`.
 - `ml/layers/attention/multiheadattention.go` — builder gains `useFusion bool` (default true, set in constructor), `querySeqLen/keyValueSeqLen *Node` fields, methods `WithFusion`, `WithSeqLens` [S1]; later `attentionBias *Node` + `WithAttentionBias` [S2]; `doneInternal` builds the config and passes `useFusion` to `Core`.
 - `ml/layers/attention/fusion_test.go` — **NEW** [S1], test-only. Houses the relocated decomposed oracles (`naiveCausalAttention`, `naiveGQAReference`, `repeatKVHeads`), the `backendSupportsFusion` probe, the CPU-testable builder/wiring tests, and the backend-general parity tests (loop `TestOfficialBackends`, skip when unsupported).
 - `ml/layers/attention/flash_test.go` — **DELETE** [S1] (its content moves to `fusion_test.go`, generalized).
@@ -66,7 +66,7 @@ cd /Users/guygrigsby/projects/forks/gomlx
 grep -n 'replace.*gomlx/compute' go.mod
 go doc github.com/gomlx/compute.ScaledDotProductAttentionConfig
 ```
-Expected: `go.mod` has a `replace github.com/gomlx/compute => /Users/guygrigsby/projects/forks/compute` (or equivalent local path), and `go doc` lists `QuerySeqLen Value` and `KeyValueSeqLen Value` on the struct. (The S2 fields `Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset` may or may not be present yet — they are not required for Stage 1; Task 8 verifies them.)
+Expected: `go.mod` has a `replace github.com/gomlx/compute => /Users/guygrigsby/projects/forks/compute` (or equivalent local path), and `go doc` lists `QuerySeqLen Value` and `KeyValueSeqLen Value` on the struct. (The S2 field `Bias` may or may not be present yet — it is not required for Stage 1; Task 8 verifies it.)
 
 - [ ] **Step 2: Decision gate**
 
@@ -418,7 +418,7 @@ through Core. Method name follows the WithX builder convention."
 
 ## Task 4: Builder `WithSeqLens` → config QuerySeqLen/KeyValueSeqLen [S1]
 
-Add `querySeqLen`/`keyValueSeqLen *Node` fields and `WithSeqLens`, mutually exclusive with an explicit `queryKeyMatrixMask`. When set, `doneInternal` builds a `*compute.ScaledDotProductAttentionConfig{QuerySeqLen, KeyValueSeqLen}` and passes it into the fused branch. Threading the config requires `Core` to accept and forward it. **Stage 1 only populates `QuerySeqLen/KeyValueSeqLen`** — the only fused-config fields that exist at this stage (per compute Stage 1). `Bias`/dropout config plumbing is Stage 2 (Tasks 8–9), and those compute fields do not exist until compute Stage 2.
+Add `querySeqLen`/`keyValueSeqLen *Node` fields and `WithSeqLens`, mutually exclusive with an explicit `queryKeyMatrixMask`. When set, `doneInternal` builds a `*compute.ScaledDotProductAttentionConfig{QuerySeqLen, KeyValueSeqLen}` and passes it into the fused branch. Threading the config requires `Core` to accept and forward it. **Stage 1 only populates `QuerySeqLen/KeyValueSeqLen`** — the only fused-config fields that exist at this stage (per compute Stage 1). `Bias` config plumbing is Stage 2 (Task 8), and that compute field does not exist until compute Stage 2.
 
 **Files:**
 - Modify: `ml/layers/attention/attention.go` (Core: accept an optional config and pass it to `BackendFusedScaledDotProductAttention` instead of the hardcoded `nil` at ~272)
@@ -1095,7 +1095,7 @@ Run:
 cd /Users/guygrigsby/projects/forks/gomlx
 go doc github.com/gomlx/compute.ScaledDotProductAttentionConfig
 ```
-Expected: lists `Bias Value` (plus `DropoutRate`, `DropoutSeed`, `DropoutOffset` for Task 9). If absent, STOP and report: "plan 01 Stage 2 (compute) is not integrated; cannot proceed with plan 03 Stage 2."
+Expected: lists `Bias Value`. If absent, STOP and report: "plan 01 Stage 2 (compute) is not integrated; cannot proceed with plan 03 Stage 2."
 
 - [ ] **Step 1: Write the failing test (CPU)**
 
@@ -1237,120 +1237,7 @@ bias (UseProjectionBias); both may be set. Core gains a trailing biasNode param.
 
 ## Task 9: Relax Core's `!dropoutActive` fused-branch gate [S2]
 
-**Depends on compute Stage 2:** `compute.ScaledDotProductAttentionConfig` must carry `DropoutRate float64`, `DropoutSeed Value`, `DropoutOffset Value` (plan 01 Stage 2). Verified by Task 8 Step 0.
-
-Today `Core`'s fused branch is gated so that active dropout forces the decomposed path. The current condition (`attention.go:265`) is:
-```go
-	if wantCoefficients || dropoutActive || scoreSoftCap > 0 || !useFusion {
-		output, coefficients = decomposedFn()
-	} else { /* fused */ }
-```
-where `dropoutActive := layers.IsDropoutActive(scope, g) && dropoutRate != nil` (line 195). Stage 2 relaxes this so `Core` may fuse **with** dropout when the backend supports fused dropout, threading the dropout rate + seed/offset into the config. The precise relaxed condition: drop `dropoutActive` from the force-decomposed disjunction and instead force-decompose only when dropout is active AND fusion can't carry it (no config / no seed-offset / fusion off). Concretely:
-
-```go
-	// Dropout can ride the fused path when we have a config to carry the rate+seed+offset and
-	// fusion is enabled; otherwise active dropout still forces the decomposed path.
-	fusedDropoutOK := dropoutActive && useFusion && fusedConfig != nil &&
-		fusedConfig.DropoutSeed != nil && fusedConfig.DropoutOffset != nil
-	forceDecomposed := wantCoefficients || scoreSoftCap > 0 || !useFusion ||
-		(dropoutActive && !fusedDropoutOK)
-	if forceDecomposed {
-		output, coefficients = decomposedFn()
-	} else {
-		// fused: when fusedDropoutOK, fusedConfig already carries DropoutRate/Seed/Offset, so
-		// BackendFusedScaledDotProductAttention selects the fmha*Dropout variant; on a backend
-		// without fused dropout it returns ErrNotImplemented and InternalFusedOpCaller falls back
-		// to decomposedFn (which applies dropout), so correctness is preserved either way.
-		...
-	}
-```
-The fused branch already forwards `fusedConfig` (from Task 4); when it carries `DropoutRate`/`DropoutSeed`/`DropoutOffset`, the go-xla backend (Contract C) selects the `fmhaSoftmaxDropout` variant, and the `ErrNotImplemented` fallback keeps CPU correct. The builder populates the dropout config fields from `b.dropoutRate` plus a seed/offset (derive the seed/offset from the scope's RNG the same way `layers.Dropout` does — grep `layers.Dropout` / the RNG state it reads, and reuse that source so fused and decomposed dropout are seeded identically for parity).
-
-**Files:**
-- Modify: `ml/layers/attention/attention.go` (relax the gate; `decomposedFn` unchanged — it already applies dropout at lines 248-250)
-- Modify: `core/graph/fused_ops.go` (extend the config helper to carry `DropoutRate`/`DropoutSeed`/`DropoutOffset`)
-- Modify: `ml/layers/attention/multiheadattention.go` (`doneInternal` populates the dropout config fields from `b.dropoutRate` + RNG seed/offset)
-- Test: `ml/layers/attention/fusion_test.go`
-
-**Interfaces:**
-- Consumes (Contract A, Stage 2): `ScaledDotProductAttentionConfig{ DropoutRate float64; DropoutSeed, DropoutOffset Value }`.
-- No new public builder method — `WithDropout` (existing) is the entry point; the change is internal to `Core`'s gate and the config population.
-
-- [ ] **Step 1: Write the failing test (CPU)**
-
-On CPU the fused dropout path is `ErrNotImplemented`, so the CPU test pins (a) the relaxed gate still produces correct decomposed dropout output (fallback), and (b) the gate compiles with the new condition. Add to `ml/layers/attention/fusion_test.go`:
-```go
-// TestFusedDropoutGateFallsBackOnCPU pins that with active dropout and fusion enabled, Core still
-// produces output on CPU (the fused dropout variant is ErrNotImplemented there, so it falls back to
-// the decomposed dropout path). Guards the relaxed gate. Dropout active requires a training scope.
-func TestFusedDropoutGateFallsBackOnCPU(t *testing.T) {
-	backend := testutil.BuildTestBackend()
-	const B, S, H, D = 1, 32, 2, 64
-	scale := 0.125
-	q := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 1), B, S, H, D)
-	k := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 2), B, S, H, D)
-	v := tensors.FromFlatDataAndDimensions(randFlat(B*S*H*D, 3), B, S, H, D)
-
-	// WithDropout is a builder method, so this S2 test uses the MultiHeadAttention builder on the
-	// pre-projected path.
-	flat := func(n *Node) *Node { d := n.Shape().Dimensions; return Reshape(n, d[0], d[1], d[2]*d[3]) }
-	store := model.NewStore()
-	exec := model.MustNewExec(backend, store, func(scope *model.Scope, qn, kn, vn *Node) []*Node {
-		scope = scope.WithTraining(true) // activate dropout; use this fork's training-scope API
-		out := MultiHeadAttention(scope, flat(qn), flat(kn), flat(vn), H, D).
-			WithPreProjected(true).WithQueryKeyScale(scale).
-			UseCausalMask().
-			WithDropout(Scalar(qn.Graph(), dtypes.Float32, 0.1)).
-			Done()
-		return []*Node{ReduceAllMax(Abs(ConvertDType(out, dtypes.Float32)))}
-	})
-	out := exec.MustCall(q, k, v)
-	require.False(t, math.IsNaN(float64(tensors.ToScalar[float32](out[0]))), "dropout fallback produced NaN")
-}
-```
-(Confirm the training-scope activation API in this fork — grep `IsDropoutActive` and `WithTraining`/`Training(` in `ml/layers` and `ml/model` to find how dropout is switched on; use the real call. `math` is already imported from Task 6.)
-
-- [ ] **Step 2: Run the test to verify it fails (or fails to compile)**
-
-Run: `go test ./ml/layers/attention/ -run TestFusedDropoutGateFallsBackOnCPU`
-Expected: FAIL — before the gate change, active dropout + the fused-config dropout fields are inconsistent (or the config fields do not yet populate). If the test passes immediately because the old gate already routes dropout to decomposed, change the assertion to also require, via a `backendSupportsFusion` branch, that on a fusion backend the fused dropout variant is attempted (the `[cuda]` Step 5 covers the real fused-path assertion; on CPU it must at least compile with the relaxed gate referencing `fusedConfig.DropoutSeed`).
-
-- [ ] **Step 3: Relax the gate and populate the dropout config**
-
-In `ml/layers/attention/attention.go`, replace the force-decomposed condition with the relaxed form shown in this task's prose (`fusedDropoutOK` + `forceDecomposed`). `decomposedFn` is unchanged (it already applies dropout at lines 248-250). Extend `core/graph/fused_ops.go`'s `NewFusedAttentionConfig` to also accept dropout rate + seed/offset nodes and set `DropoutRate`/`DropoutSeed`/`DropoutOffset`. In `doneInternal`, when `b.dropoutRate != nil` and dropout is active, populate those config fields from `b.dropoutRate` and the scope RNG seed/offset (reuse the same RNG source `layers.Dropout` reads so fused and decomposed seed identically).
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `go test ./ml/layers/attention/ -run TestFusedDropoutGateFallsBackOnCPU`
-Expected: PASS (CPU falls back to decomposed dropout; no NaN).
-
-- [ ] **Step 5: [cuda] Fused-dropout parity on the CUDA host**
-
-Add an `xla:cuda` dropout-parity case: run `Core` with active dropout twice with the SAME seed/offset and assert the fused output is deterministic and within statistical tolerance of the decomposed dropout (same seed) output. Run on the CUDA host:
-```bash
-GOMLX_BACKEND=xla:cuda \
-  go test ./ml/layers/attention/ -run 'TestFusedDropout' -v
-```
-Expected: PASS — the `fmhaSoftmaxDropout` variant runs; same-seed fused vs decomposed match within tolerance.
-
-- [ ] **Step 6: Run the full package on Mac**
-
-Run: `go build ./... && go test ./ml/layers/attention/...`
-Expected: PASS; CUDA/dropout-fused tests SKIP on CPU.
-
-- [ ] **Step 7: Commit**
-
-```bash
-cd /Users/guygrigsby/projects/forks/gomlx
-git add core/graph/fused_ops.go ml/layers/attention/attention.go ml/layers/attention/multiheadattention.go ml/layers/attention/fusion_test.go
-git commit -m "attention: relax Core fused-branch gate to fuse with dropout
-
-Drop the blanket !dropoutActive force-decompose; Core now fuses with dropout when
-fusion is on and the config carries DropoutRate/Seed/Offset, selecting the
-fmha*Dropout variant. Backends without fused dropout return ErrNotImplemented and
-fall back to the decomposed dropout path, so CPU stays correct. Seed/offset reuse
-the layers.Dropout RNG source so fused and decomposed match for the same seed."
-```
+CUT (2026-06-30): fused dropout removed; no caller needs it. Stays a NotImplemented seam. See contract Staging.
 
 ---
 
@@ -1366,16 +1253,16 @@ cd /Users/guygrigsby/projects/forks/gomlx
 go build ./...
 go test ./ml/layers/attention/...
 ```
-Expected: PASS. `WithAttentionBias` decomposed bias and the relaxed dropout gate both fall back correctly on CPU; CUDA/dropout-fused tests SKIP.
+Expected: PASS. `WithAttentionBias` decomposed bias falls back correctly on CPU; CUDA tests SKIP.
 
-- [ ] **Gate 2 — [cuda] bias + dropout fused-parity green**
+- [ ] **Gate 2 — [cuda] bias fused-parity green**
 
 Run (on the CUDA host):
 ```bash
 GOMLX_BACKEND=xla:cuda \
-  go test ./ml/layers/attention/... -run 'TestCUDAFusionParity|TestWithAttentionBias|TestFusedDropout' -v
+  go test ./ml/layers/attention/... -run 'TestCUDAFusionParity|TestWithAttentionBias' -v
 ```
-Expected: PASS — `fmhaScaleBiasSoftmax` and `fmhaSoftmaxDropout` variants run within tolerance.
+Expected: PASS — `fmhaScaleBiasSoftmax` variant runs within tolerance.
 
 - [ ] **Gate 3 — Stop and report**
 
@@ -1396,14 +1283,13 @@ All Stage 2 gates green → Contract D is fully satisfied (S1 + S2). Report gate
 - `backendSupportsFusion` probe replacing `isCUDABackend`; loop `TestOfficialBackends`; `testutil.GetOfficialBackend` (Task 5); one `xla:cuda` parity test → Tasks 5-6 [S1]. ✓
 - Bench: rename `TestFusionThroughput`, single `WithFusion`-toggled code path, `FinalizeAll`, `for range iters`, flags-not-env → Task 7 [S1]. ✓
 - **`WithAttentionBias(bias *Node)` → `config.Bias`, explicitly DISTINCT from `UseProjectionBias`** (independent, may both be set; the task spells out the difference) → Task 8 [S2]. ✓
-- **Relax `Core`'s `!dropoutActive` fused-branch gate:** exact current condition quoted (`attention.go:265` + `dropoutActive` at line 195); precise relaxed condition written (`fusedDropoutOK`/`forceDecomposed`); fuses with dropout when the config carries rate+seed+offset, ErrNotImplemented fallback preserves CPU correctness → Task 9 [S2]. ✓
-- S2 tasks note their dependency on compute Stage 2 config fields (`Bias`, `DropoutRate`, `DropoutSeed`, `DropoutOffset`); Task 8 Step 0 / Task 9 verify them before code. ✓
+- **Fused dropout: CUT (2026-06-30).** Fused-with-dropout removed; no caller needs it. `Core`'s `!dropoutActive` gate stays UNCHANGED (still declines to fuse when decomposed dropout is active); Task 9 is a NotImplemented seam → Task 9 [S2]. ✓
+- The S2 task notes its dependency on the compute Stage 2 config field (`Bias`); Task 8 Step 0 verifies it before code. ✓
 - CUDA-execution tests marked `[cuda]`; CPU-testable items enumerated → present per task and in both gates. ✓
 
-**Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N". Flagged uncertainties — the `*Node → compute.Value` config boundary (Task 4), the `FinalizeAll` finalizer name (Task 7), the bias `*Node` wiring into `Core`'s decomposed path (Task 8), the training-scope/RNG-seed API for fused dropout (Task 9) — each carry an explicit grep-and-resolve instruction with a concrete fallback, not a hand-wave. Acceptable: the implementer is told exactly what to check and what to do either way.
+**Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N". Flagged uncertainties — the `*Node → compute.Value` config boundary (Task 4), the `FinalizeAll` finalizer name (Task 7), the bias `*Node` wiring into `Core`'s decomposed path (Task 8) — each carry an explicit grep-and-resolve instruction with a concrete fallback, not a hand-wave. Acceptable: the implementer is told exactly what to check and what to do either way.
 
 **Type consistency:** `Core`'s signature grows monotonically — Task 2 appends `useFusion bool`, Task 4 appends `fusedConfig *compute.ScaledDotProductAttentionConfig`, Task 8 appends `biasNode *Node` — and every call-site-update step references the same trailing-arg shape at that point in the plan. `WithFusion`/`WithSeqLens`/`GetOfficialBackend`/`backendSupportsFusion`/`NewSeqLenAttentionConfig`/`NewFusedAttentionConfig`/`WithAttentionBias` names match between producing and consuming tasks. No `SimpleAttention` is produced — the deletion has no replacement helper. `naiveCausalAttention`/`naiveGQAReference`/`repeatKVHeads` relocate once to `fusion_test.go` (Task 1) as test-only decomposed oracles, referenced by the parity tests (Task 6); `randFlat` is added to `fusion_test.go` (Task 2) and referenced thereafter.
 
 **Known residual risk to flag at execution:**
 - Task 4/8's `NewSeqLenAttentionConfig`/`NewFusedAttentionConfig` reach into `node.outputOps[0]`; confirm `outputOps` is the field name on `*Node` in this fork (grep `outputOps` in `core/graph/fused_ops.go` — it is used there, so the helpers compile in the same package). The only places the plan touches `core/graph` rather than `ml/layers/attention`.
-- Task 9's fused-dropout seed/offset must come from the same RNG source `layers.Dropout` reads, or fused vs decomposed dropout will not match for a given seed; the `[cuda]` parity test (Task 9 Step 5) is the arbiter.
